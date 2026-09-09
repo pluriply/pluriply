@@ -1,0 +1,29 @@
+{
+  "name": "pluriply",
+  "version": "0.1.0",
+  "description": "Connect your AI coding tools into one collaboration channel",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pluriply/pluriply.git"
+  },
+  "homepage": "https://github.com/pluriply/pluriply#readme",
+  "bugs": {
+    "url": "https://github.com/pluriply/pluriply/issues"
+  },
+  "bin": {
+    "pluriply": "./bin/pluriply.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'"
+  }
+}
