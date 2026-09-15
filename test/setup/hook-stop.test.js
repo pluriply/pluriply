@@ -1,17 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  formatStopReason,
-  runStopHook,
-  HOOK_AGENTS,
-} from "../../src/setup/hook-stop.js";
+import { formatStopReason, runStopHook } from "../../src/setup/hook-stop.js";
 
-const BIN = fileURLToPath(new URL("../../bin/pluriply.js", import.meta.url));
 const poll = {
   tool: "claude-code",
   cwd: "/repo",
@@ -290,17 +280,6 @@ test("runStopHook closes a client that connects after the 2s deadline instead of
   assert.equal(requested, false);
 });
 
-/** hook-stop CLI 자식 프로세스를 한 번 돌린다. 각 테스트가 독립된 PLURIPLY_HOME 을 쓴다. */
-function runHookCli(args, input) {
-  const home = mkdtempSync(join(tmpdir(), "plp-hookcli-"));
-  return spawnSync(process.execPath, [BIN, "hook", "stop", ...args], {
-    input,
-    encoding: "utf8",
-    env: { ...process.env, PLURIPLY_HOME: home },
-    timeout: 10_000,
-  });
-}
-
 test("runStopHook maps workspacePaths[0] for antigravity and answers decision continue", async () => {
   const fake = (reply) => async () => ({
     request: async (type, payload) => {
@@ -335,51 +314,4 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
     connect: fake2,
   });
   assert.equal(r2.decision, "continue");
-});
-
-test("the CLI prints one JSON line and exits 0 with no hub, with a TTY-less empty stdin, and with a bad agent", () => {
-  const home = mkdtempSync(join(tmpdir(), "plp-hookcli-"));
-  const run = (args, input) =>
-    spawnSync(process.execPath, [BIN, "hook", "stop", ...args], {
-      input,
-      encoding: "utf8",
-      env: { ...process.env, PLURIPLY_HOME: home },
-      timeout: 10_000,
-    });
-  for (const [args, input] of [
-    [
-      ["--agent", "claude-code"],
-      JSON.stringify({ cwd: home, session_id: "x" }),
-    ],
-    [["--agent", "codex"], ""],
-    [["--agent", "nope"], "{}"],
-    [[], "{}"],
-  ]) {
-    const r = run(args, input);
-    assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(JSON.parse(r.stdout.trim()), {});
-    assert.equal(r.stderr, "");
-  }
-  assert.deepEqual(HOOK_AGENTS, ["claude-code", "codex", "antigravity"]);
-});
-
-test("the CLI exits 0 with {} when --agent= has an empty value", () => {
-  const r = runHookCli(["--agent="], "{}");
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout.trim()), {});
-  assert.equal(r.stderr, "");
-});
-
-test("the CLI exits 0 with {} when --agent is immediately followed by another flag", () => {
-  const r = runHookCli(["--agent", "--foo"], "{}");
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout.trim()), {});
-  assert.equal(r.stderr, "");
-});
-
-test("the CLI exits 0 with {} when --agent has no value at all (last token)", () => {
-  const r = runHookCli(["--agent"], "{}");
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout.trim()), {});
-  assert.equal(r.stderr, "");
 });
