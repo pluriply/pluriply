@@ -13,7 +13,7 @@
     "url": "https://github.com/pluriply/pluriply/issues"
   },
   "bin": {
-    "pluriply": "./bin/pluriply.js"
+    "pluriply": "bin/pluriply.js"
   },
   "engines": {
     "node": ">=20"
@@ -24,6 +24,6 @@
     "zod": "^4.5.4"
   },
   "scripts": {
-    "test": "node --test 'test/**/*.test.js'"
+    "test": "node scripts/run-tests.mjs"
   }
 }

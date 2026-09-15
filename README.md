@@ -8,13 +8,13 @@ Pluriply is a trademark of TQSoft.
 
 ## Supported tools
 
-| Tool                     | Role                             |
-| ------------------------ | -------------------------------- |
-| Claude Code (CLI)        | interactive peer, headless worker |
-| Codex (CLI)              | interactive peer, headless worker |
-| Antigravity CLI (`agy`)  | interactive peer, headless worker |
-| Claude Desktop           | interactive peer                 |
-| Antigravity IDE          | interactive peer                 |
+| Tool                    | Role                              |
+| ----------------------- | --------------------------------- |
+| Claude Code (CLI)       | interactive peer, headless worker |
+| Codex (CLI)             | interactive peer, headless worker |
+| Antigravity CLI (`agy`) | interactive peer, headless worker |
+| Claude Desktop          | interactive peer                  |
+| Antigravity IDE         | interactive peer                  |
 
 Requires Node.js 20 or newer. macOS is tested; Linux should work; Windows is untested.
 
@@ -30,6 +30,8 @@ Pluriply MCP connector with each of them (idempotent — run it again any time).
 - `npx pluriply setup --dry-run` — show what would change without touching anything.
 - `npx pluriply setup --workers` — also let the hub run Claude Code / Codex / Antigravity headlessly for `send_task` and `ask_agent`.
 - `npx pluriply setup --only claude-code,codex` — limit to specific tools.
+- `npx pluriply setup --remove` — unregister Pluriply from every tool, disable headless workers and stop the hub. Your channels and task history under `~/.pluriply` stay; add `--purge` to delete them too.
+- Codex and Antigravity get a 600 s MCP tool timeout written into their config at registration (their default is 60 s, too short for `ask_agent`/`request_review` waits). If you registered with an earlier version, run `setup --remove` then `setup` again to pick it up.
 
 Restart your AI tools afterwards so they pick up the new MCP server.
 
@@ -70,7 +72,10 @@ source is not in this repository. We keep the hub proprietary because it is
 the part of Pluriply we intend to build a business on; the parts that run
 inside your tools stay open so you can audit them.
 
-## Issues
+## Issues and contributions
 
-Bug reports and questions: https://github.com/pluriply/pluriply/issues
-Licensing inquiries: support@pluriply.com
+Bug reports and feature requests: https://github.com/pluriply/pluriply/issues — the templates ask for the details we need.
+
+Pull requests are welcome for the connector, setup and shared code in this repository. `main` accepts changes only through pull requests, and the `test` workflow (ubuntu, windows, macos × Node 20, 22) must pass. The hub itself ships as a bundle under LICENSE-HUB.md and is developed separately.
+
+Accepted pull requests are applied to the upstream (private) repository and land here with the next sync, so a merged PR may be rewritten by a later sync commit.

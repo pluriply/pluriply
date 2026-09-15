@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in pluriply does not work as documented
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: pluriply version
+      description: Output of `npx pluriply --version` (or `npm ls -g pluriply`)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Node version
+      placeholder: macOS 15.1 / Node 22.11
+    validations:
+      required: true
+  - type: checkboxes
+    id: clients
+    attributes:
+      label: Connected clients
+      options:
+        - label: Claude Code
+        - label: Codex
+        - label: Antigravity CLI
+        - label: Antigravity IDE
+        - label: Claude Desktop
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `pluriply status`
+      render: text

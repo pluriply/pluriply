@@ -1,18 +1,18 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import {
   Hub,
   stopHub,
   spawnHub,
   readLock,
   loadConfig,
-  saveConfig,
+  setWorkerEnabled,
   TEMPLATE_AGENTS,
 } from "../src/hub/index.js";
 import { pluriplyHome } from "../src/shared/paths.js";
-import { pingHub } from "../src/shared/probe.js";
+import { pingHub, pidAlive } from "../src/shared/probe.js";
 import { connectIfLive } from "../src/connector/hub-client.js";
 import { isValidAgentName } from "../src/shared/identity.js";
 import { registerMcpServer } from "../src/shared/mcp-register.js";
@@ -22,11 +22,30 @@ const BIN_PATH = fileURLToPath(import.meta.url);
 const [cmd, ...rest] = process.argv.slice(2);
 const sub = rest[0];
 
-/** --agent x 같은 플래그 파싱 */
+/**
+ * `--agent x` 와 `--agent=x` 둘 다 파싱한다. 값이 없거나(마지막 토큰) 뒤 토큰이 `--`로 시작하면
+ * (다음 플래그를 값으로 삼켜버린 것) 조용히 undefined 를 돌려주지 않고 즉시 사용법 오류로
+ * 종료한다 — 그렇지 않으면 `setup --remove --purge --only`(값 없이 끝남)나
+ * `setup --remove --purge --only=codex`(`=` 형을 못 읽어 undefined)처럼 스코프를 좁히는 플래그가
+ * 조용히 무시되어 의도보다 넓은 범위(--purge 전체 삭제)가 exit 0 으로 실행된다.
+ */
 function flag(name) {
-  const i = rest.indexOf(`--${name}`);
-  return i === -1 ? undefined : rest[i + 1];
+  const i = rest.findIndex(
+    (t) => t === `--${name}` || t.startsWith(`--${name}=`),
+  );
+  if (i === -1) return undefined;
+  const inline = rest[i].startsWith(`--${name}=`);
+  const v = inline ? rest[i].slice(name.length + 3) : rest[i + 1];
+  if (v === undefined || v === "" || (!inline && v.startsWith("--"))) {
+    console.error(`missing value for --${name}`);
+    process.exit(1);
+  }
+  return v;
 }
+
+/** setup 이 아는 플래그. 오타 하나가 파괴적인 명령의 범위를 넓히지 못하게 한다. */
+const SETUP_BOOL_FLAGS = ["workers", "dry-run", "remove", "purge"];
+const SETUP_VALUE_FLAGS = ["only"];
 
 if (cmd === "hub" && sub === "start") {
   try {
@@ -105,27 +124,7 @@ if (cmd === "hub" && sub === "start") {
       console.error(`no worker template for "${agent}"`);
       process.exit(1);
     }
-    const cfg = loadConfig(home);
-    const workers = { ...cfg.workers };
-    if (sub === "enable")
-      workers[agent] = { ...(workers[agent] ?? {}), enabled: true };
-    else delete workers[agent];
-    // 원본 config.json 문서를 그대로 보존한 채 workers만 갱신한다: loadConfig가
-    // 돌려주는 cfg는 allowedRoots·limits를 기본값으로 채워 넣은 파생값이라, 그걸
-    // 그대로 다시 쓰면 사용자가 직접 넣은 allowedRoots(Task 1의 cwd 경계 설정)나
-    // 손대지 않은 다른 키가 사라진다. 파일을 다시 읽어 병합한다(없거나 손상돼도 {}).
-    const file = join(home, "config.json");
-    let rawDoc = {};
-    if (existsSync(file)) {
-      try {
-        rawDoc = JSON.parse(readFileSync(file, "utf8"));
-      } catch {
-        rawDoc = {};
-      }
-    }
-    if (!rawDoc || typeof rawDoc !== "object" || Array.isArray(rawDoc))
-      rawDoc = {};
-    saveConfig(home, { ...rawDoc, workers });
+    setWorkerEnabled(home, [agent], sub === "enable");
     if (sub === "enable") registerMcpServer(agent, { binPath: BIN_PATH });
     console.log(`worker ${agent} ${sub}d`);
   } else {
@@ -137,14 +136,50 @@ if (cmd === "hub" && sub === "start") {
 } else if (cmd === "setup") {
   const { runSetup, formatSetup } = await import("../src/setup/run-setup.js");
   const { makeEnv } = await import("../src/setup/clients.js");
+  const usage = (msg) => {
+    console.error(`setup: ${msg}`);
+    process.exit(1);
+  };
+  // `--only a,b` 처럼 값 플래그 바로 뒤에 오는 토큰만 대시 없는 인자로 허용한다.
+  const valueSlots = new Set();
+  rest.forEach((tok, i) => {
+    if (!tok.startsWith("--") || tok.includes("=")) return;
+    if (SETUP_VALUE_FLAGS.includes(tok.slice(2))) valueSlots.add(i + 1);
+  });
+  // 모르는 플래그는 아무것도 실행하기 전에 거부한다: `--pruge` 같은 오타가 조용히 무시되면
+  // `--remove --pruge` 가 "그냥 제거"로 통과하고, 반대로 좁히려던 플래그의 오타는 범위를 넓힌다.
+  // 대시 없는 토큰도 마찬가지다 — `pluriply setup remove` 는 지금까지 조용히 "등록"을 실행했다.
+  for (const [i, tok] of rest.entries()) {
+    if (!tok.startsWith("--")) {
+      if (!valueSlots.has(i)) usage(`unexpected argument "${tok}"`);
+      continue;
+    }
+    const nm = tok.slice(2).split("=")[0];
+    if (SETUP_BOOL_FLAGS.includes(nm)) {
+      // `--dry-run=false` 처럼 값을 붙이면 지금까지는 토큰 자체가 안 맞아 조용히 무시됐다.
+      if (tok.includes("=")) usage(`--${nm} takes no value`);
+    } else if (!SETUP_VALUE_FLAGS.includes(nm)) usage(`unknown flag --${nm}`);
+  }
   const onlyArg = flag("only");
   const workers = rest.includes("--workers");
   const dryRun = rest.includes("--dry-run");
+  const remove = rest.includes("--remove");
+  const purge = rest.includes("--purge");
+  if (remove && workers) usage("--remove cannot be combined with --workers");
+  if (purge && !remove) usage("--purge requires --remove");
+  if (purge && onlyArg) usage("--purge cannot be combined with --only");
   try {
     const r = await runSetup({
-      only: onlyArg ? onlyArg.split(",").map((x) => x.trim()).filter(Boolean) : undefined,
+      only: onlyArg
+        ? onlyArg
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+        : undefined,
       workers,
       dryRun,
+      remove,
+      purge,
       env: makeEnv({ binPath: BIN_PATH }),
       home: pluriplyHome(),
     });
@@ -156,17 +191,28 @@ if (cmd === "hub" && sub === "start") {
     process.exit(1);
   }
 } else if (cmd === "status") {
-  const lock = readLock(pluriplyHome());
+  const home = pluriplyHome();
+  const lock = readLock(home);
   if (!lock) {
     console.log("not running");
   } else {
     const info = await pingHub(lock.port);
-    if (!info) {
-      console.log(`stale lockfile (pid ${lock.pid} not responding)`);
-    } else {
+    if (info) {
       console.log(
         `running (port ${lock.port}, pid ${info.pid ?? lock.pid}, version ${info.version ?? "unknown"}, protocol ${info.protocol ?? 1})`,
       );
+    } else if (!pidAlive(lock.pid)) {
+      // Windows 에서는 SIGTERM 이 정리 핸들러 없이 즉시 종료라 허브가 락을 못 지운다.
+      // pid 가 죽었으면 stopHub 와 같은 판정으로 락을 지우고 not running 으로 본다.
+      // 단, pingHub 가 기다리는 동안 hub start 가 새 락을 썼을 수 있으니 다시 읽어
+      // pid 가 그대로일 때만 지운다(남의 새 락을 지우지 않기 위해).
+      const current = readLock(home);
+      if (current?.pid === lock.pid) {
+        rmSync(join(home, "hub.json"), { force: true });
+      }
+      console.log("not running");
+    } else {
+      console.log(`stale lockfile (pid ${lock.pid} not responding)`);
     }
   }
 } else if (cmd === "connector") {
@@ -183,7 +229,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b]|hub start|hub stop|hub restart|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b]|setup --remove [--purge] [--dry-run] [--only a,b]|hub start|hub stop|hub restart|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }
