@@ -32,6 +32,8 @@ Pluriply MCP connector with each of them (idempotent — run it again any time).
 - `npx pluriply setup --only claude-code,codex` — limit to specific tools.
 - `npx pluriply setup --remove` — unregister Pluriply from every tool, disable headless workers and stop the hub. Your channels and task history under `~/.pluriply` stay; add `--purge` to delete them too.
 - Codex and Antigravity get a 600 s MCP tool timeout written into their config at registration (their default is 60 s, too short for `ask_agent`/`request_review` waits). If you registered with an earlier version, run `setup --remove` then `setup` again to pick it up.
+- `setup` also installs a Stop hook for Claude Code, Codex and Antigravity CLI so a live session notices new tasks and finished results at the end of its turn (see _Warm reception_). `--no-hooks` skips it; `setup --remove` takes it out again.
+- Re-run `setup` after upgrading or cleaning the npx cache — the hook command embeds the installed path.
 
 Restart your AI tools afterwards so they pick up the new MCP server.
 
@@ -54,6 +56,17 @@ npx pluriply hub restart            # restart it (e.g. after an upgrade)
 npx pluriply worker enable codex    # allow headless Codex workers
 npx pluriply worker list
 ```
+
+## Warm reception
+
+With the Stop hook installed, a Claude Code, Codex or Antigravity CLI session
+that is finishing a turn asks the hub whether anything arrived for it: tasks
+sent to it, or results of tasks it delegated. If so, the session is asked to
+handle them before it stops — no polling, no "check your tasks" from you.
+Each item is announced once; the session reads details with `list_tasks` and
+`get_task_result`. An idle session (waiting for your input) notices them at
+the end of its next turn. Codex asks you to trust the new hook the first time
+it runs. Antigravity's hook lives in `~/.gemini/config/hooks.json`.
 
 ## Where your data lives
 

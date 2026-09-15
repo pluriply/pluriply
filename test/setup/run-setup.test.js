@@ -18,6 +18,7 @@ import { makeEnv, configPath } from "../../src/setup/clients.js";
 import { TEMPLATE_AGENTS } from "../../src/shared/config.js";
 import { emptyHome, seededHome } from "../fixtures/seeded-home.js";
 import { skipUnlessSymlinks } from "../fixtures/platform.js";
+import { HOOK_CLIENTS } from "../../src/setup/hooks.js";
 
 const BIN = "/opt/pluriply/bin/pluriply.js";
 
@@ -548,4 +549,114 @@ test("purge unlinks a symlinked pluriply home instead of wiping the directory it
   );
   // rm 은 가짜라 실제로 지워지지 않았지만, 링크 대상이 삭제 대상이 아니었음을 남겨둔다.
   assert.equal(readFileSync(join(real, "keep.txt"), "utf8"), "keep me");
+});
+
+function hookFile(env, id) {
+  return HOOK_CLIENTS.find((h) => h.id === id).file(env);
+}
+function hookResults(r) {
+  return Object.fromEntries(r.hookRows.map((x) => [x.id, x.result]));
+}
+
+test("setup installs Stop hooks for claude-code and codex by default, reports them, and is idempotent", async () => {
+  const { home, env } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  const r = await runSetup({ env, home });
+  assert.deepEqual(hookResults(r), {
+    "claude-code": "registered",
+    codex: "registered",
+    antigravity: "registered",
+  });
+  assert.equal(existsSync(hookFile(env, "claude-code")), true);
+  assert.equal(existsSync(hookFile(env, "codex")), true);
+  assert.equal(existsSync(hookFile(env, "antigravity")), true);
+  const lines = formatSetup(r);
+  assert.ok(
+    lines.some((l) => /^hooks claude-code\s+installed\s+registered$/.test(l)),
+    lines.join("\n"),
+  );
+  assert.ok(
+    lines.includes(
+      "hint: Codex asks to trust the new hook in its next session — approve it.",
+    ),
+  );
+  const again = await runSetup({ env, home });
+  assert.deepEqual(hookResults(again), {
+    "claude-code": "present",
+    codex: "present",
+    antigravity: "present",
+  });
+  assert.ok(!formatSetup(again).some((l) => l.startsWith("hint: Codex asks")));
+});
+
+test("setup --no-hooks skips hooks, --dry-run plans them, --only limits them, and hooks are not attempted for tools that are not installed", async () => {
+  const { home, env } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  assert.deepEqual(hookResults(await runSetup({ env, home, hooks: false })), {
+    "claude-code": "skipped",
+    codex: "skipped",
+    antigravity: "skipped",
+  });
+  assert.equal(existsSync(hookFile(env, "claude-code")), false);
+  assert.deepEqual(hookResults(await runSetup({ env, home, dryRun: true })), {
+    "claude-code": "planned",
+    codex: "planned",
+    antigravity: "planned",
+  });
+  assert.equal(existsSync(hookFile(env, "claude-code")), false);
+  assert.deepEqual(
+    hookResults(await runSetup({ env, home, only: ["codex"] })),
+    { codex: "registered" },
+  );
+  assert.deepEqual(
+    hookResults(await runSetup({ env, home, only: ["claude-desktop"] })),
+    {},
+  );
+  // 도구가 설치돼 있지 않으면(감지 실패) 훅 행은 not installed
+  const { exec } = fakeExec();
+  const missing = makeEnv({
+    ...env,
+    exec: (cmd, args) => {
+      if (cmd === "codex") throw new Error("ENOENT");
+      return exec(cmd, args);
+    },
+  });
+  const r = await runSetup({ env: missing, home });
+  assert.equal(hookResults(r).codex, "not installed");
+});
+
+test("setup --remove removes the hooks it installed and leaves other hook groups alone", async () => {
+  const { home, env } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  writeFileSync(
+    hookFile(env, "codex"),
+    JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "/bin/echo other" }] }],
+      },
+    }),
+  );
+  await runSetup({ env, home });
+  const r = await runSetup({ env, home, remove: true });
+  assert.deepEqual(hookResults(r), {
+    "claude-code": "removed",
+    codex: "removed",
+    antigravity: "removed",
+  });
+  assert.deepEqual(
+    JSON.parse(readFileSync(hookFile(env, "codex"), "utf8")).hooks.Stop,
+    [{ hooks: [{ type: "command", command: "/bin/echo other" }] }],
+  );
+  assert.deepEqual(hookResults(await runSetup({ env, home, remove: true })), {
+    "claude-code": "absent",
+    codex: "absent",
+    antigravity: "absent",
+  });
+  assert.deepEqual(
+    hookResults(await runSetup({ env, home, remove: true, dryRun: true })),
+    { "claude-code": "absent", codex: "absent", antigravity: "absent" },
+  );
 });

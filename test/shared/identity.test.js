@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { mkdtempSync, mkdirSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   isValidAgentName,
   resolveAgentName,
@@ -10,6 +12,7 @@ import {
   toolOf,
   cwdKey,
 } from "../../src/shared/identity.js";
+import { skipUnlessSymlinks } from "../fixtures/platform.js";
 
 test("agent names reject #, / and whitespace", () => {
   assert.equal(isValidAgentName("claude-code"), true);
@@ -51,11 +54,26 @@ test("cwdKey is tool@8-hex and follows resolved paths", () => {
   assert.notEqual(cwdKey("claude-code", "/tmp/proj"), key);
 });
 
+test("cwdKey follows a symlink to the real path (macOS /var → /private/var style aliasing)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "plp-identity-"));
+  if (!skipUnlessSymlinks(t, dir)) return;
+  const real = join(dir, "real");
+  const link = join(dir, "link");
+  mkdirSync(real);
+  symlinkSync(real, link);
+  assert.equal(cwdKey("codex", link), cwdKey("codex", real));
+});
+
 test("resolveAgentName renames antigravity to antigravity-ide only when spawned by the IDE", () => {
-  const ide = { ANTIGRAVITY_EDITOR_APP_ROOT: "/Applications/Antigravity IDE.app" };
+  const ide = {
+    ANTIGRAVITY_EDITOR_APP_ROOT: "/Applications/Antigravity IDE.app",
+  };
   assert.equal(resolveAgentName("antigravity", ide), "antigravity-ide");
   assert.equal(resolveAgentName("antigravity", {}), "antigravity");
-  assert.equal(resolveAgentName("antigravity", { VSCODE_PID: "1" }), "antigravity");
+  assert.equal(
+    resolveAgentName("antigravity", { VSCODE_PID: "1" }),
+    "antigravity",
+  );
   assert.equal(resolveAgentName("codex", ide), "codex");
   assert.equal(resolveAgentName("antigravity-ide", ide), "antigravity-ide");
 });

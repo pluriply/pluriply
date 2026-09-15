@@ -8,6 +8,7 @@ import {
   realpathSync,
   statSync,
   chmodSync,
+  mkdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -82,6 +83,7 @@ export function makeEnv(o = {}) {
       realpathSync,
       statSync,
       chmodSync,
+      mkdirSync,
     },
     ...o,
   };
@@ -243,7 +245,7 @@ function chmodQuiet(fs, path, mode) {
   }
 }
 
-function writeJsonAtomic(env, path, doc) {
+export function writeJsonAtomic(env, path, doc) {
   writeFileAtomic(env, path, JSON.stringify(doc, null, 2) + "\n");
 }
 

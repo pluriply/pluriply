@@ -2,6 +2,7 @@ import { existsSync, rmSync, realpathSync, lstatSync } from "node:fs";
 import { join, dirname, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { CLIENTS, makeEnv, isSkipped } from "./clients.js";
+import { HOOK_CLIENTS, hookStatus, installHook, removeHook } from "./hooks.js";
 import { setWorkerEnabled, TEMPLATE_AGENTS } from "../shared/config.js";
 import { readLock } from "../shared/lock.js";
 // 허브(stopHub)와 커넥터(ensureHub → ws)는 쓰는 순간에만 불러온다. 공개 미러에는 src/hub 가
@@ -72,12 +73,42 @@ function walkClients({ targets, e, dryRun, act, dryRunResult, collect }) {
 }
 
 /**
+ * MCP 등록 표(`rows`)를 바탕으로 훅 행을 만든다(스펙 §6). 도구가 감지되지 않았으면 not installed,
+ * `hooks:false` 면 skipped, dry-run 은 상태만 본다. 실패는 failed 로 세고 진행한다.
+ * @returns {{hookRows: object[], failed: number}}
+ */
+function walkHooks({ targets, rows, e, dryRun, hooks, remove }) {
+  const hookRows = [];
+  let failed = 0;
+  for (const hc of HOOK_CLIENTS) {
+    if (!targets.some((c) => c.id === hc.id)) continue;
+    const row = rows.find((x) => x.id === hc.id);
+    const installed = Boolean(row?.installed);
+    let result;
+    if (!installed) result = "not installed";
+    else if (!hooks) result = "skipped";
+    else if (dryRun) {
+      const st = hookStatus(e, hc);
+      if (typeof st === "object") result = `failed: ${st.error}`;
+      else if (remove) result = st === "missing" ? "absent" : "planned";
+      else result = st === "present" ? "present" : "planned";
+    } else result = remove ? removeHook(e, hc) : installHook(e, hc);
+    if (result === "failed") result = "failed: see hint above";
+    if (result.startsWith("failed")) failed++;
+    hookRows.push({ id: hc.id, label: hc.label, installed, result });
+  }
+  return { hookRows, failed };
+}
+
+/**
  * `pluriply setup`: 설치된 클라이언트를 감지해 pluriply 커넥터를 멱등 등록한다.
  * `remove` 면 반대로 등록을 풀고 워커 설정·허브·(purge 시) 데이터까지 정리한다.
  * `--purge` 는 pluriply 홈이 심볼릭 링크면 **링크만 끊고** 링크가 가리키는 디렉터리는 남긴다
  * (그 안의 내용까지 지우려면 실제 경로를 직접 지워야 한다).
  * env.stopHub / env.rm / env.lstat 은 테스트가 주입한다.
- * @param {{only?: string[], workers?: boolean, dryRun?: boolean, remove?: boolean, purge?: boolean, env?: object, home: string}} opts
+ * `hooks`(기본 true)는 Claude Code·Codex 의 Stop 훅 등록 여부다(스펙 §6). `--remove` 는 이 값과
+ * 무관하게 항상 훅을 제거한다.
+ * @param {{only?: string[], workers?: boolean, dryRun?: boolean, remove?: boolean, purge?: boolean, hooks?: boolean, env?: object, home: string}} opts
  */
 export async function runSetup({
   only,
@@ -85,6 +116,7 @@ export async function runSetup({
   dryRun = false,
   remove = false,
   purge = false,
+  hooks = true,
   env,
   home,
 }) {
@@ -103,11 +135,13 @@ export async function runSetup({
         enabledAgents.push(c.agent);
     },
   });
+  const hk = walkHooks({ targets, rows, e, dryRun, hooks, remove: false });
   if (workers && !dryRun && enabledAgents.length > 0)
     setWorkerEnabled(home, enabledAgents, true);
   const out = {
     rows,
-    failed,
+    failed: failed + hk.failed,
+    hookRows: hk.hookRows,
     workers: workers && !dryRun ? enabledAgents : [],
   };
   if (!dryRun) {
@@ -184,10 +218,13 @@ async function runRemove({ targets, only, dryRun, purge, e, home }) {
     // 여기서 따로 모을 게 없다.
     collect: () => {},
   });
+  // --remove 는 --no-hooks 와 무관하게 항상 훅을 제거한다.
+  const hk = walkHooks({ targets, rows, e, dryRun, hooks: true, remove: true });
   const out = {
     mode: "remove",
     rows,
-    failed: rowsFailed,
+    failed: rowsFailed + hk.failed,
+    hookRows: hk.hookRows,
     workers: [],
     workersDisabled: [],
   };
@@ -266,6 +303,10 @@ export function formatSetup(r, { workers = false } = {}) {
     (row) =>
       `${row.id.padEnd(16)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
   );
+  for (const row of r.hookRows ?? [])
+    lines.push(
+      `hooks ${row.id.padEnd(12)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
+    );
   if (r.mode === "remove") {
     if (r.workersDisabled.length)
       lines.push(`workers disabled: ${r.workersDisabled.join(", ")}`);
@@ -295,5 +336,15 @@ export function formatSetup(r, { workers = false } = {}) {
         `hint: run \`pluriply worker enable <${cli.join("|")}>\` to let the hub run that tool headlessly (or re-run setup --workers)`,
       );
   }
+  if (
+    (r.hookRows ?? []).some(
+      (x) =>
+        x.id === "codex" &&
+        (x.result === "registered" || x.result === "updated"),
+    )
+  )
+    lines.push(
+      "hint: Codex asks to trust the new hook in its next session — approve it.",
+    );
   return lines;
 }

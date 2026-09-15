@@ -44,7 +44,7 @@ function flag(name) {
 }
 
 /** setup 이 아는 플래그. 오타 하나가 파괴적인 명령의 범위를 넓히지 못하게 한다. */
-const SETUP_BOOL_FLAGS = ["workers", "dry-run", "remove", "purge"];
+const SETUP_BOOL_FLAGS = ["workers", "dry-run", "remove", "purge", "no-hooks"];
 const SETUP_VALUE_FLAGS = ["only"];
 
 if (cmd === "hub" && sub === "start") {
@@ -165,9 +165,11 @@ if (cmd === "hub" && sub === "start") {
   const dryRun = rest.includes("--dry-run");
   const remove = rest.includes("--remove");
   const purge = rest.includes("--purge");
+  const hooks = !rest.includes("--no-hooks");
   if (remove && workers) usage("--remove cannot be combined with --workers");
   if (purge && !remove) usage("--purge requires --remove");
   if (purge && onlyArg) usage("--purge cannot be combined with --only");
+  if (remove && !hooks) usage("--no-hooks has no effect with --remove");
   try {
     const r = await runSetup({
       only: onlyArg
@@ -180,6 +182,7 @@ if (cmd === "hub" && sub === "start") {
       dryRun,
       remove,
       purge,
+      hooks,
       env: makeEnv({ binPath: BIN_PATH }),
       home: pluriplyHome(),
     });
@@ -215,6 +218,45 @@ if (cmd === "hub" && sub === "start") {
       console.log(`stale lockfile (pid ${lock.pid} not responding)`);
     }
   }
+} else if (cmd === "hook" && sub === "stop") {
+  // Stop 훅(스펙 §3). 어떤 경우에도 JSON 한 줄 + exit 0. 늦게 열린 소켓이 프로세스를 잡아두지
+  // 않도록 출력 뒤 바로 종료한다.
+  const { runStopHook } = await import("../src/setup/hook-stop.js");
+  // 기존 flag()는 값이 없거나 모양이 이상하면(마지막 토큰, `--agent=`, 다음 플래그를
+  // 값으로 삼키려는 모양) exit(1)을 부르는데, 훅은 무슨 입력이 와도 항상 exit 0이어야
+  // 한다 — flag()를 쓰지 않고 여기서 직접 파싱해, 못 읽으면 그냥 undefined로 둔다
+  // (runStopHook이 알 수 없는/undefined agent를 {}로 처리한다).
+  let agent;
+  const ai = rest.findIndex((t) => t === "--agent" || t.startsWith("--agent="));
+  if (ai !== -1) {
+    if (rest[ai].startsWith("--agent=")) {
+      const v = rest[ai].slice("--agent=".length);
+      agent = v === "" ? undefined : v;
+    } else {
+      const v = rest[ai + 1];
+      agent = v === undefined || v.startsWith("--") ? undefined : v;
+    }
+  }
+  let input = "";
+  if (!process.stdin.isTTY) {
+    try {
+      for await (const chunk of process.stdin) input += chunk;
+    } catch {
+      input = "";
+    }
+  }
+  let out = {};
+  try {
+    out = await runStopHook({ agent, input, home: pluriplyHome() });
+  } catch {
+    out = {};
+  }
+  // 출력 뒤 바로 종료한다: 늦게 열린 소켓이 프로세스를 잡아두지 않게 한다. write()의
+  // 콜백을 기다려 스트림이 비동기 파이프인 플랫폼(Windows)에서 출력이 잘리지 않게 하고,
+  // 그 콜백이 오지 않는 경우를 대비해 폴백 타이머도 둔다(타이머 자체가 프로세스를
+  // 붙잡지 않도록 unref).
+  process.stdout.write(JSON.stringify(out) + "\n", () => process.exit(0));
+  setTimeout(() => process.exit(0), 500).unref?.();
 } else if (cmd === "connector") {
   const agent = flag("agent");
   if (!agent) {
@@ -229,7 +271,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b]|setup --remove [--purge] [--dry-run] [--only a,b]|hub start|hub stop|hub restart|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks]|setup --remove [--purge] [--dry-run] [--only a,b]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }

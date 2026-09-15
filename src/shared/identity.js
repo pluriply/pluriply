@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 /** ids.js의 shortId 알파벳(i, l, o, 0, 1 제외)과 같은 문자 집합 */
@@ -16,7 +17,8 @@ export function isValidAgentName(name) {
  * @param {string} agent @param {NodeJS.ProcessEnv} env @returns {string}
  */
 export function resolveAgentName(agent, env) {
-  if (agent === "antigravity" && env.ANTIGRAVITY_EDITOR_APP_ROOT) return "antigravity-ide";
+  if (agent === "antigravity" && env.ANTIGRAVITY_EDITOR_APP_ROOT)
+    return "antigravity-ide";
   return agent;
 }
 
@@ -50,6 +52,15 @@ export function toolOf(id) {
  * @param {string} tool @param {string} cwd @returns {string} `<tool>@<sha256 앞 8자>`
  */
 export function cwdKey(tool, cwd) {
-  const hash = createHash("sha256").update(resolve(cwd)).digest("hex");
+  // 심볼릭 링크로 인한 별칭(예: macOS /var → /private/var, cwd 별칭 디렉터리)을
+  // 같은 키로 묶는다. 존재하지 않는 경로는 realpath 가 실패하므로 resolve 결과를 쓴다
+  // (커넥터가 아직 만들어지지 않은 폴더로 뜨는 드문 경우까지 키를 안정적으로 유지).
+  let p = resolve(cwd);
+  try {
+    p = realpathSync.native(p);
+  } catch {
+    // 그대로 둔다
+  }
+  const hash = createHash("sha256").update(p).digest("hex");
   return `${tool}@${hash.slice(0, 8)}`;
 }
