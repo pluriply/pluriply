@@ -44,7 +44,14 @@ function flag(name) {
 }
 
 /** setup 이 아는 플래그. 오타 하나가 파괴적인 명령의 범위를 넓히지 못하게 한다. */
-const SETUP_BOOL_FLAGS = ["workers", "dry-run", "remove", "purge", "no-hooks"];
+const SETUP_BOOL_FLAGS = [
+  "workers",
+  "dry-run",
+  "remove",
+  "purge",
+  "no-hooks",
+  "hooks-only",
+];
 const SETUP_VALUE_FLAGS = ["only"];
 
 if (cmd === "hub" && sub === "start") {
@@ -166,10 +173,17 @@ if (cmd === "hub" && sub === "start") {
   const remove = rest.includes("--remove");
   const purge = rest.includes("--purge");
   const hooks = !rest.includes("--no-hooks");
+  const hooksOnly = rest.includes("--hooks-only");
   if (remove && workers) usage("--remove cannot be combined with --workers");
   if (purge && !remove) usage("--purge requires --remove");
   if (purge && onlyArg) usage("--purge cannot be combined with --only");
   if (remove && !hooks) usage("--no-hooks has no effect with --remove");
+  // --hooks-only 는 MCP 등록·워커·허브를 건드리지 않는다(스펙 §4.1). 그것들을 겨냥한 플래그와는 모순.
+  if (hooksOnly && workers)
+    usage("--hooks-only cannot be combined with --workers");
+  if (hooksOnly && !hooks)
+    usage("--hooks-only cannot be combined with --no-hooks");
+  if (hooksOnly && purge) usage("--hooks-only cannot be combined with --purge");
   try {
     const r = await runSetup({
       only: onlyArg
@@ -183,6 +197,7 @@ if (cmd === "hub" && sub === "start") {
       remove,
       purge,
       hooks,
+      hooksOnly,
       env: makeEnv({ binPath: BIN_PATH }),
       home: pluriplyHome(),
     });
@@ -271,7 +286,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks]|setup --remove [--purge] [--dry-run] [--only a,b]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }

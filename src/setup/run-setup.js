@@ -14,6 +14,10 @@ const hubClient = () => import("../connector/hub-client.js");
 export const REMOVE_NOTE =
   "note: close or restart open client sessions; their connectors may restart the hub";
 
+/** `--hooks-only` 실행의 첫 줄(스펙 §4.3). MCP 표가 비어 있는 이유를 알려 준다. */
+export const HOOKS_ONLY_NOTE =
+  "hooks only — MCP registration, workers and hub untouched";
+
 /** @param {string[]|undefined} only */
 function resolveTargets(only) {
   if (!only) return CLIENTS;
@@ -108,7 +112,8 @@ function walkHooks({ targets, rows, e, dryRun, hooks, remove }) {
  * env.stopHub / env.rm / env.lstat 은 테스트가 주입한다.
  * `hooks`(기본 true)는 Claude Code·Codex 의 Stop 훅 등록 여부다(스펙 §6). `--remove` 는 이 값과
  * 무관하게 항상 훅을 제거한다.
- * @param {{only?: string[], workers?: boolean, dryRun?: boolean, remove?: boolean, purge?: boolean, hooks?: boolean, env?: object, home: string}} opts
+ * `hooksOnly`(스펙 §4)는 MCP 등록·워커·허브를 건너뛰고 Stop 훅만 설치(`remove` 면 제거)한다.
+ * @param {{only?: string[], workers?: boolean, dryRun?: boolean, remove?: boolean, purge?: boolean, hooks?: boolean, hooksOnly?: boolean, env?: object, home: string}} opts
  */
 export async function runSetup({
   only,
@@ -117,11 +122,13 @@ export async function runSetup({
   remove = false,
   purge = false,
   hooks = true,
+  hooksOnly = false,
   env,
   home,
 }) {
   const e = env ?? makeEnv();
   const targets = resolveTargets(only);
+  if (hooksOnly) return runHooksOnly({ targets, e, dryRun, remove });
   if (remove) return runRemove({ targets, only, dryRun, purge, e, home });
   const enabledAgents = [];
   const { rows, failed } = walkClients({
@@ -205,6 +212,29 @@ export function purgeRefusal(home, e = {}) {
   if (depth(target) < 2 || depth(resolve(home)) < 2)
     return `${target} is a top-level directory`;
   return null;
+}
+
+/**
+ * `setup --hooks-only` / `setup --remove --hooks-only`(스펙 §4.2). walkHooks 는 도구 감지 여부를
+ * walkClients 의 행(`installed`)에서 읽으므로, 등록을 건드리지 않고 detect 만 돌려 같은 모양의 행을 만든다.
+ * 허브는 띄우지도 세우지도 않는다 — 훅은 발동 시점에 connectIfLive 로 허브를 찾는다(D7).
+ */
+function runHooksOnly({ targets, e, dryRun, remove }) {
+  const rows = targets.map((c) => ({
+    id: c.id,
+    label: c.label,
+    installed: Boolean(c.detect(e).installed),
+    result: "untouched",
+  }));
+  const hk = walkHooks({ targets, rows, e, dryRun, hooks: true, remove });
+  return {
+    mode: remove ? "hooks-only-remove" : "hooks-only",
+    rows: [],
+    hookRows: hk.hookRows,
+    failed: hk.failed,
+    workers: [],
+    workersDisabled: [],
+  };
 }
 
 async function runRemove({ targets, only, dryRun, purge, e, home }) {
@@ -297,16 +327,38 @@ async function runRemove({ targets, only, dryRun, purge, e, home }) {
   return out;
 }
 
+/** @param {object[]} hookRows @returns {string[]} */
+function hookLines(hookRows) {
+  return (hookRows ?? []).map(
+    (row) =>
+      `hooks ${row.id.padEnd(12)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
+  );
+}
+/** Codex 는 새 훅을 다음 세션에서 신뢰 승인해야 한다 — 새로 쓰였을 때만 안내한다. @param {object[]} hookRows */
+function codexTrustHint(hookRows) {
+  return (hookRows ?? []).some(
+    (x) =>
+      x.id === "codex" && (x.result === "registered" || x.result === "updated"),
+  )
+    ? [
+        "hint: Codex asks to trust the new hook in its next session — approve it.",
+      ]
+    : [];
+}
+
 /** @param {Awaited<ReturnType<typeof runSetup>>} r @returns {string[]} 사람이 읽는 표 */
 export function formatSetup(r, { workers = false } = {}) {
+  if (r.mode === "hooks-only" || r.mode === "hooks-only-remove")
+    return [
+      HOOKS_ONLY_NOTE,
+      ...hookLines(r.hookRows),
+      ...codexTrustHint(r.hookRows),
+    ];
   const lines = r.rows.map(
     (row) =>
       `${row.id.padEnd(16)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
   );
-  for (const row of r.hookRows ?? [])
-    lines.push(
-      `hooks ${row.id.padEnd(12)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
-    );
+  lines.push(...hookLines(r.hookRows));
   if (r.mode === "remove") {
     if (r.workersDisabled.length)
       lines.push(`workers disabled: ${r.workersDisabled.join(", ")}`);
@@ -336,15 +388,6 @@ export function formatSetup(r, { workers = false } = {}) {
         `hint: run \`pluriply worker enable <${cli.join("|")}>\` to let the hub run that tool headlessly (or re-run setup --workers)`,
       );
   }
-  if (
-    (r.hookRows ?? []).some(
-      (x) =>
-        x.id === "codex" &&
-        (x.result === "registered" || x.result === "updated"),
-    )
-  )
-    lines.push(
-      "hint: Codex asks to trust the new hook in its next session — approve it.",
-    );
+  lines.push(...codexTrustHint(r.hookRows));
   return lines;
 }

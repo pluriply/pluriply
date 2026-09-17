@@ -14,5 +14,6 @@ export const PACKAGE_VERSION = pkg.version;
  * 4: Plan 2e (agent.hello, 인스턴스 단위 peers, 행위자는 연결에서, dispatch pinned).
  * 5: Plan 3a (task.wait 보류 응답).
  * 6: Plan 3b (task.kind/review, task.complete의 review, task.list의 kind).
+ * 7: Plan 4f (연결 토큰 — ping 외 모든 요청은 Authorization: Bearer <token> 연결에서만 처리).
  */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;

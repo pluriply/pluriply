@@ -31,9 +31,10 @@ Pluriply MCP connector with each of them (idempotent — run it again any time).
 - `npx pluriply setup --workers` — also let the hub run Claude Code / Codex / Antigravity headlessly for `send_task` and `ask_agent`.
 - `npx pluriply setup --only claude-code,codex` — limit to specific tools.
 - `npx pluriply setup --remove` — unregister Pluriply from every tool, disable headless workers and stop the hub. Your channels and task history under `~/.pluriply` stay; add `--purge` to delete them too.
+- `npx pluriply setup --remove --hooks-only` — take out only the Stop hooks; MCP registration, headless workers and the hub stay as they are.
 - Codex and Antigravity get a 600 s MCP tool timeout written into their config at registration (their default is 60 s, too short for `ask_agent`/`request_review` waits). If you registered with an earlier version, run `setup --remove` then `setup` again to pick it up.
 - `setup` also installs a Stop hook for Claude Code, Codex and Antigravity CLI so a live session notices new tasks and finished results at the end of its turn (see _Warm reception_). `--no-hooks` skips it; `setup --remove` takes it out again.
-- Re-run `setup` after upgrading or cleaning the npx cache — the hook command embeds the installed path.
+- After upgrading or cleaning the npx cache, run `npx pluriply@latest setup --hooks-only` — the hook command embeds the installed path, and this refreshes it without rewriting your MCP configuration.
 
 Restart your AI tools afterwards so they pick up the new MCP server.
 
@@ -72,6 +73,13 @@ it runs. Antigravity's hook lives in `~/.gemini/config/hooks.json`.
 
 Everything stays on your machine under `~/.pluriply/` (channels, task history,
 results). There is no server and no account. Delete the folder to reset.
+
+The hub only listens on `127.0.0.1`, and since 0.4.0 it also issues a random
+token every time it starts, kept in `~/.pluriply/hub.json` (mode 600). Only
+connectors and hooks that read that file can talk to it; anything else can
+only ping it (version and pid) and gets `unauthorized` for everything else.
+On Windows the file mode is not enforced — the profile folder's ACL is what
+keeps other users out.
 
 ## License
 

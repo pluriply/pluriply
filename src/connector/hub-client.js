@@ -44,10 +44,18 @@ const RETRYABLE = new Set([
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** @returns {Promise<WebSocket|null>} 연결 실패 시 null */
-function tryConnect(port, timeoutMs = 1000) {
+/**
+ * @param {number} port @param {number} [timeoutMs] @param {string} [token] 허브 락의 연결 토큰(Plan 4f).
+ *   있으면 업그레이드 헤더 `Authorization: Bearer <token>` 으로 보낸다. 없으면(구버전 허브) 헤더 없이 붙는다.
+ * @returns {Promise<WebSocket|null>} 연결 실패 시 null
+ */
+function tryConnect(port, timeoutMs = 1000, token) {
   return new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = token
+      ? new WebSocket(`ws://127.0.0.1:${port}`, {
+          headers: { authorization: `Bearer ${token}` },
+        })
+      : new WebSocket(`ws://127.0.0.1:${port}`);
     const timer = setTimeout(() => {
       ws.terminate();
       resolve(null);
@@ -165,7 +173,7 @@ export class HubClient extends EventEmitter {
       try {
         const { port, info } = await ensureHub({ home: this.home });
         if (this.closed) return; // close()가 ensureHub 대기 중에 호출됨
-        const ws = await tryConnect(port, 3000);
+        const ws = await tryConnect(port, 3000, info.token);
         if (this.closed) {
           ws?.terminate(); // close()가 tryConnect 대기 중에 호출됨: 새 소켓을 붙이지 않는다
           return;
@@ -216,7 +224,7 @@ export class HubClient extends EventEmitter {
    */
   static async connect({ home = pluriplyHome(), reconnectTotalMs } = {}) {
     const { port, info } = await ensureHub({ home });
-    const ws = await tryConnect(port, 3000);
+    const ws = await tryConnect(port, 3000, info.token);
     if (!ws) throw new Error("could not connect to pluriply hub");
     const client = new HubClient(ws, { home, reconnectTotalMs });
     client.stale = staleFrom(info, port);
@@ -319,7 +327,7 @@ export class HubClient extends EventEmitter {
 export async function connectIfLive({ home = pluriplyHome() } = {}) {
   const live = await liveHub(home);
   if (!live) return null;
-  const ws = await tryConnect(live.port, 3000);
+  const ws = await tryConnect(live.port, 3000, live.token);
   if (!ws) return null;
   const client = new HubClient(ws, {});
   client.stale = staleFrom(live, live.port);

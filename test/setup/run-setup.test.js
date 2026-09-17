@@ -13,6 +13,7 @@ import {
   runSetup,
   formatSetup,
   REMOVE_NOTE,
+  HOOKS_ONLY_NOTE,
 } from "../../src/setup/run-setup.js";
 import { makeEnv, configPath } from "../../src/setup/clients.js";
 import { TEMPLATE_AGENTS } from "../../src/shared/config.js";
@@ -659,4 +660,105 @@ test("setup --remove removes the hooks it installed and leaves other hook groups
     hookResults(await runSetup({ env, home, remove: true, dryRun: true })),
     { "claude-code": "absent", codex: "absent", antigravity: "absent" },
   );
+});
+
+test("hooksOnly installs only the Stop hooks: no MCP writes, no worker change, no hub", async () => {
+  const { user, home, env, calls } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  const before = readFileSync(user.cd, "utf8");
+  const configBefore = readFileSync(join(home, "config.json"), "utf8");
+
+  const r = await runSetup({ env, home, hooksOnly: true });
+  assert.equal(r.mode, "hooks-only");
+  assert.deepEqual(r.rows, []);
+  assert.deepEqual(hookResults(r), {
+    "claude-code": "registered",
+    codex: "registered",
+    antigravity: "registered",
+  });
+  assert.equal(r.hub, undefined);
+  assert.equal(existsSync(join(home, "hub.json")), false); // 허브를 띄우지 않았다
+  assert.equal(readFileSync(user.cd, "utf8"), before); // MCP 설정 파일 그대로
+  assert.equal(readFileSync(join(home, "config.json"), "utf8"), configBefore); // 워커 설정 그대로
+  // detect 는 `--version` 만 부른다. add/remove/list 같은 MCP 등록 명령은 없어야 한다.
+  assert.ok(
+    calls.every(([, ...args]) => args[0] === "--version"),
+    JSON.stringify(calls),
+  );
+
+  const lines = formatSetup(r);
+  assert.equal(lines[0], HOOKS_ONLY_NOTE);
+  assert.ok(
+    lines.some((l) => /^hooks claude-code\s+installed\s+registered$/.test(l)),
+  );
+  assert.ok(
+    !lines.some((l) => /^hub:|^workers|^hint: run/.test(l)),
+    lines.join("\n"),
+  );
+  assert.ok(
+    lines.includes(
+      "hint: Codex asks to trust the new hook in its next session — approve it.",
+    ),
+  );
+});
+
+test("hooksOnly remove takes only the hooks out and leaves MCP registration, workers and the hub alone", async () => {
+  const { user, home, env, stopCalls } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  await runSetup({ env, home, hooksOnly: true });
+  const before = readFileSync(user.cd, "utf8");
+
+  const r = await runSetup({ env, home, hooksOnly: true, remove: true });
+  assert.equal(r.mode, "hooks-only-remove");
+  assert.deepEqual(hookResults(r), {
+    "claude-code": "removed",
+    codex: "removed",
+    antigravity: "removed",
+  });
+  assert.deepEqual(stopCalls, []);
+  assert.deepEqual(r.workersDisabled, []);
+  assert.equal(r.note, undefined);
+  assert.equal(readFileSync(user.cd, "utf8"), before);
+  assert.equal(
+    JSON.parse(readFileSync(join(home, "config.json"), "utf8")).workers.codex
+      .enabled,
+    true,
+  );
+  const lines = formatSetup(r);
+  assert.equal(lines[0], HOOKS_ONLY_NOTE);
+  assert.ok(
+    !lines.some((l) => /^hub:|^workers disabled|^note:/.test(l)),
+    lines.join("\n"),
+  );
+});
+
+test("hooksOnly honours --dry-run and --only", async () => {
+  const { home, env } = setup();
+  mkdirSync(join(env.homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(env.homeDir, ".codex"), { recursive: true });
+  const dry = await runSetup({ env, home, hooksOnly: true, dryRun: true });
+  assert.deepEqual(hookResults(dry), {
+    "claude-code": "planned",
+    codex: "planned",
+    antigravity: "planned",
+  });
+  assert.equal(existsSync(hookFile(env, "claude-code")), false);
+
+  const only = await runSetup({ env, home, hooksOnly: true, only: ["codex"] });
+  assert.deepEqual(hookResults(only), { codex: "registered" });
+  assert.equal(existsSync(hookFile(env, "claude-code")), false);
+  assert.equal(existsSync(hookFile(env, "codex")), true);
+
+  const dryRemove = await runSetup({
+    env,
+    home,
+    hooksOnly: true,
+    remove: true,
+    dryRun: true,
+    only: ["codex"],
+  });
+  assert.deepEqual(hookResults(dryRemove), { codex: "planned" });
+  assert.equal(existsSync(hookFile(env, "codex")), true);
 });

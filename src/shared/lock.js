@@ -11,9 +11,13 @@ export function readLock(home) {
   if (!existsSync(lockPath)) return null;
   try {
     const doc = JSON.parse(readFileSync(lockPath, "utf8"));
-    return Number.isInteger(doc?.pid) && Number.isInteger(doc?.port)
-      ? doc
-      : null;
+    if (!Number.isInteger(doc?.pid) || !Number.isInteger(doc?.port))
+      return null;
+    // Plan 4f: 연결 토큰. 구버전 허브의 락에는 없고, 문자열이 아니면 없는 것으로 본다.
+    const { token, ...rest } = doc;
+    return typeof token === "string" && token.length > 0
+      ? { ...rest, token }
+      : rest;
   } catch {
     return null;
   }
