@@ -20,6 +20,7 @@ import {
   codexConfigPath,
   agyConfigPath,
   TOOL_TIMEOUT_SEC,
+  CODEX_STARTUP_TIMEOUT_SEC,
 } from "../../src/setup/clients.js";
 import { emptyHome, seededHome } from "../fixtures/seeded-home.js";
 import { skipOnWindows, skipUnlessSymlinks } from "../fixtures/platform.js";
@@ -539,8 +540,9 @@ test("JSON adapters unregister with a backup, keep other servers, and refuse cor
   );
 });
 
-test("codex register writes tool_timeout_sec under [mcp_servers.pluriply] and rolls back when it cannot", () => {
+test("codex register writes tool_timeout_sec and startup_timeout_sec under [mcp_servers.pluriply] and rolls back when it cannot", () => {
   assert.equal(TOOL_TIMEOUT_SEC, 600);
+  assert.equal(CODEX_STARTUP_TIMEOUT_SEC, 30);
   const { home, codexToml } = seededHome();
   const { exec, calls } = fakeExec({ list: "nothing" });
   assert.equal(
@@ -549,7 +551,7 @@ test("codex register writes tool_timeout_sec under [mcp_servers.pluriply] and ro
   );
   assert.match(
     readFileSync(codexToml, "utf8"),
-    /\[mcp_servers\.pluriply\]\ntool_timeout_sec = 600\ncommand = "node"/,
+    /\[mcp_servers\.pluriply\]\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\ncommand = "node"/,
   );
   assert.match(
     readFileSync(codexToml, "utf8"),
@@ -557,18 +559,27 @@ test("codex register writes tool_timeout_sec under [mcp_servers.pluriply] and ro
   );
   assert.ok(existsSync(`${codexToml}.bak`));
   assert.equal(calls.filter((c) => c[2] === "remove").length, 0);
-  // 이미 있으면 보존하고 파일을 다시 쓰지 않는다
-  writeFileSync(codexToml, "[mcp_servers.pluriply]\ntool_timeout_sec = 45\n");
+  // 두 키가 이미 있으면 사용자 값을 보존하고 파일을 다시 쓰지 않는다
+  const both =
+    "[mcp_servers.pluriply]\ntool_timeout_sec = 45\nstartup_timeout_sec = 99\n";
+  writeFileSync(codexToml, both);
   writeFileSync(`${codexToml}.bak`, "marker");
+  assert.equal(
+    byId("codex").register(env({ exec, homeDir: home })),
+    "registered",
+  );
+  assert.equal(readFileSync(codexToml, "utf8"), both);
+  assert.equal(readFileSync(`${codexToml}.bak`, "utf8"), "marker");
+  // 0.5.0 이하로 설치해 tool_timeout_sec 만 있으면 그 값은 두고 startup_timeout_sec 만 더한다
+  writeFileSync(codexToml, "[mcp_servers.pluriply]\ntool_timeout_sec = 45\n");
   assert.equal(
     byId("codex").register(env({ exec, homeDir: home })),
     "registered",
   );
   assert.equal(
     readFileSync(codexToml, "utf8"),
-    "[mcp_servers.pluriply]\ntool_timeout_sec = 45\n",
+    "[mcp_servers.pluriply]\nstartup_timeout_sec = 30\ntool_timeout_sec = 45\n",
   );
-  assert.equal(readFileSync(`${codexToml}.bak`, "utf8"), "marker");
   // 헤더가 없으면 mcp remove 로 롤백하고 failed
   writeFileSync(codexToml, 'model = "gpt"\n');
   const logs = [];
@@ -710,6 +721,56 @@ test("antigravity register writes timeoutSeconds into agy's mcp_config.json and 
   assert.match(
     byId("antigravity").register(env({ exec, homeDir: emptyHome() })),
     /^failed: timeoutSeconds not written/,
+  );
+});
+
+test("re-running setup on an already registered codex/antigravity fills in missing timeout keys and never rolls back", () => {
+  // 예전 버전으로 등록한 사용자가 setup 만 다시 돌려도 새 키(Codex startup_timeout_sec 등)를 받게 한다.
+  const { home, codexToml, agyJson } = seededHome();
+  const { exec, calls } = fakeExec({ list: "pluriply  node /x connector" });
+  const logs = [];
+  writeFileSync(
+    codexToml,
+    '[mcp_servers.pluriply]\ntool_timeout_sec = 45\ncommand = "node"\n',
+  );
+  writeFileSync(
+    agyJson,
+    JSON.stringify({ mcpServers: { pluriply: { command: "node" } } }),
+  );
+  const e = env({ exec, homeDir: home, log: (l) => logs.push(l) });
+  assert.equal(byId("codex").register(e), "present");
+  assert.equal(byId("antigravity").register(e), "present");
+  assert.equal(
+    readFileSync(codexToml, "utf8"),
+    '[mcp_servers.pluriply]\nstartup_timeout_sec = 30\ntool_timeout_sec = 45\ncommand = "node"\n',
+  );
+  assert.equal(
+    JSON.parse(readFileSync(agyJson, "utf8")).mcpServers.pluriply
+      .timeoutSeconds,
+    600,
+  );
+  assert.ok(
+    logs.some((l) => /updated Codex/.test(l)),
+    logs.join("\n"),
+  );
+  // 이미 등록돼 있으니 add 는 부르지 않는다
+  assert.equal(calls.filter((c) => c[2] === "add").length, 0);
+
+  // 다시 돌리면 채울 것이 없어 파일을 건드리지 않고 updated 도 찍지 않는다
+  logs.length = 0;
+  const before = readFileSync(codexToml, "utf8");
+  assert.equal(byId("codex").register(e), "present");
+  assert.equal(readFileSync(codexToml, "utf8"), before);
+  assert.ok(!logs.some((l) => /updated/.test(l)), logs.join("\n"));
+
+  // 채우지 못해도(헤더 없음) 멀쩡한 등록을 되돌리지 않는다 — present 그대로, remove 없음, 안내만
+  writeFileSync(codexToml, 'model = "gpt"\n');
+  logs.length = 0;
+  assert.equal(byId("codex").register(e), "present");
+  assert.equal(calls.filter((c) => c[2] === "remove").length, 0);
+  assert.ok(
+    logs.some((l) => /hint: .*tool_timeout_sec not written/.test(l)),
+    logs.join("\n"),
   );
 });
 

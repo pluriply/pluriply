@@ -105,6 +105,13 @@ export function isSkipped(env) {
 export const TOOL_TIMEOUT_SEC = 600;
 
 /**
+ * Codex MCP 서버 기동 타임아웃(초). Codex 기본값은 10초인데, 커넥터는 MCP 핸드셰이크 전에 허브를
+ * 기다린다 — 멎은 허브가 락을 쥐면 인수 유예(10초)를 포함해 spawnHub 가 최대 20초 남짓 걸려 기본값으로는
+ * 기동에 실패한다(Plan 4g 최종 리뷰). 스폰 대기보다 길어야 한다(test/hub/timing.test.js 가 고정).
+ */
+export const CODEX_STARTUP_TIMEOUT_SEC = 30;
+
+/**
  * @param {"claude-desktop"|"antigravity-ide"} id
  * Antigravity 는 2.x 부터 IDE(`~/.gemini/antigravity-ide`) 와 허브(`~/.gemini/antigravity`) 로
  * 데이터 폴더가 갈라졌다. IDE 폴더가 있으면 그쪽, 없으면(구버전) 옛 경로.
@@ -297,7 +304,18 @@ function cliClient({
     register(env) {
       if (isSkipped(env)) return "skipped";
       const st = this.status(env);
-      if (st === "present") return "present";
+      if (st === "present") {
+        // 예전 버전으로 등록돼 타임아웃 키가 빠졌을 수 있다(예: 0.5.1 에 생긴 Codex startup_timeout_sec).
+        // 없는 키만 채우고 있는 값은 보존한다. 이미 동작하는 등록이므로 채우지 못해도 되돌리지 않고
+        // 안내만 한다 — 되돌리면 멀쩡한 등록을 지우게 된다.
+        if (afterAdd) {
+          const r = afterAdd(env);
+          if (!r.ok) env.log(`hint: ${label}: ${r.reason}`);
+          else if (r.changed)
+            env.log(`updated ${label}: added missing timeout settings`);
+        }
+        return "present";
+      }
       if (typeof st === "object") {
         env.log(
           `hint: make sure ${label} has pluriply registered: ${hint(env.binPath)}`,
@@ -497,8 +515,17 @@ export const CLIENTS = [
             ok: false,
             reason: `tool_timeout_sec not written (${path} contains triple-quoted strings; add \`tool_timeout_sec = ${TOOL_TIMEOUT_SEC}\` under [mcp_servers.pluriply] by hand)`,
           };
-        if (r.changed) writeFileAtomic(env, path, r.text);
-        return { ok: true };
+        // 헤더·트리플쿼트 판정은 파일 단위라 위에서 통과했으면 두 번째 키도 같은 이유로는 실패하지 않는다.
+        // 이미 있는 값(사용자가 고친 값 포함)은 건드리지 않는다.
+        const s = insertTomlKey(
+          r.text,
+          "mcp_servers.pluriply",
+          "startup_timeout_sec",
+          String(CODEX_STARTUP_TIMEOUT_SEC),
+        );
+        const changed = r.changed || s.changed;
+        if (changed) writeFileAtomic(env, path, s.text);
+        return { ok: true, changed };
       } catch (err) {
         return {
           ok: false,
@@ -543,11 +570,12 @@ export const CLIENTS = [
             ok: false,
             reason: `timeoutSeconds not written (mcpServers.pluriply not found in ${path})`,
           };
-        if (entry.timeoutSeconds === undefined) {
+        const changed = entry.timeoutSeconds === undefined;
+        if (changed) {
           entry.timeoutSeconds = TOOL_TIMEOUT_SEC;
           writeJsonAtomic(env, path, doc);
         }
-        return { ok: true };
+        return { ok: true, changed };
       } catch (err) {
         return {
           ok: false,

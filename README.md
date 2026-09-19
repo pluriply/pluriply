@@ -32,7 +32,7 @@ Pluriply MCP connector with each of them (idempotent — run it again any time).
 - `npx pluriply setup --only claude-code,codex` — limit to specific tools.
 - `npx pluriply setup --remove` — unregister Pluriply from every tool, disable headless workers and stop the hub. Your channels and task history under `~/.pluriply` stay; add `--purge` to delete them too.
 - `npx pluriply setup --remove --hooks-only` — take out only the Stop hooks; MCP registration, headless workers and the hub stay as they are.
-- Codex and Antigravity get a 600 s MCP tool timeout written into their config at registration (their default is 60 s, too short for `ask_agent`/`request_review` waits). If you registered with an earlier version, run `setup --remove` then `setup` again to pick it up.
+- Codex and Antigravity get a 600 s MCP tool timeout written into their config at registration (their default is 60 s, too short for `ask_agent`/`request_review` waits). Codex also gets a 30 s MCP startup timeout (its default is 10 s; the connector may have to wait for the hub to start). If you registered with an earlier version, run `setup` again to pick up anything missing — values you already set are kept (the config file is rewritten once, with a `.bak` copy of the original).
 - `setup` also installs a Stop hook for Claude Code, Codex and Antigravity CLI so a live session notices new tasks and finished results at the end of its turn (see _Warm reception_). `--no-hooks` skips it; `setup --remove` takes it out again.
 - After upgrading or cleaning the npx cache, run `npx pluriply@latest setup --hooks-only` — the hook command embeds the installed path, and this refreshes it without rewriting your MCP configuration.
 

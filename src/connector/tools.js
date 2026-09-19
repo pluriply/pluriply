@@ -54,7 +54,7 @@ function staleHubMessage(stale) {
 /**
  * 허브에 정체성을 알리고 인스턴스 ID를 받는다. 재접속 때는 알고 있는 ID를 실어 그대로 인정받는다.
  * @param {import('./hub-client.js').HubClient} hub
- * @param {{agent: string, worker?: boolean, instanceId?: string, duringReconnect?: boolean}} opts
+ * @param {{agent: string, worker?: boolean, instanceId?: string|null, duringReconnect?: boolean}} opts
  * @returns {Promise<string>}
  */
 export async function hello(
@@ -63,7 +63,14 @@ export async function hello(
 ) {
   const r = await hub.request(
     "agent.hello",
-    { tool: agent, cwd: process.cwd(), worker, instanceId },
+    // null 을 그대로 보내면 허브가 "invalid instanceId: null" 로 거절한다(undefined 만 "새로 발급"이다).
+    // 구버전 허브로 시작해 정체성이 없던 커넥터가 재접속 때 새 id 를 받을 수 있게 비운다.
+    {
+      tool: agent,
+      cwd: process.cwd(),
+      worker,
+      instanceId: instanceId ?? undefined,
+    },
     { duringReconnect },
   );
   return r.instanceId;
@@ -73,10 +80,11 @@ export async function hello(
  * Pluriply MCP 도구를 등록한다.
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
  * @param {import('./hub-client.js').HubClient} hub
- * @param {{agent: string, instanceId: string}} identity
+ * @param {{agent: string, instanceId: string|null}} identity instanceId 는 구버전 허브로 시작하면 null 이다.
  */
 export function registerTools(server, hub, { agent, instanceId }) {
-  const state = { currentChannel: null };
+  /** instanceId 는 재접속 hello 가 돌려준 값으로 갱신된다(구버전 허브로 시작해 null 이었던 경우). */
+  const state = { currentChannel: null, instanceId };
   const worker = Boolean(process.env.PLURIPLY_WORKER_TASK);
   /** 워커는 자기 태스크 깊이 + 1, 대화형 세션은 0 */
   const delegationDepth = () =>
@@ -192,7 +200,12 @@ export function registerTools(server, hub, { agent, instanceId }) {
         // join_channel이 도구를 다시 시작할 때까지 "say hello first"로 막힌다.
         // (hello는 인증이 필요한 요청이라, 토큰이 틀린 연결은 여기서 unauthorized를
         // 받아 hub-client의 재접속 판정이 그것을 본다.)
-        await hello(hub, { agent, worker, instanceId, duringReconnect: true });
+        state.instanceId = await hello(hub, {
+          agent,
+          worker,
+          instanceId: state.instanceId,
+          duringReconnect: true,
+        });
         if (!state.currentChannel) return;
         await hub.request(
           "channel.join",
@@ -226,7 +239,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
           channelCode: code,
         });
         state.currentChannel = code;
-        return ok({ channelCode: code, peers, me: instanceId });
+        return ok({ channelCode: code, peers, me: state.instanceId });
       } catch (err) {
         return fail(err.message);
       }
@@ -260,7 +273,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       });
       const { tasks } = await hub.request("task.list", {
         channelCode: code,
-        to: instanceId,
+        to: state.instanceId,
         status: "submitted",
       });
       const { running } = await hub.request("worker.status", {
@@ -591,8 +604,8 @@ export function registerTools(server, hub, { agent, instanceId }) {
       ({ status, mine_only = true, sent_by_me = false, kind }, code) =>
         hub.request("task.list", {
           channelCode: code,
-          to: sent_by_me ? undefined : mine_only ? instanceId : undefined,
-          from: sent_by_me ? instanceId : undefined,
+          to: sent_by_me ? undefined : mine_only ? state.instanceId : undefined,
+          from: sent_by_me ? state.instanceId : undefined,
           status,
           kind,
         }),

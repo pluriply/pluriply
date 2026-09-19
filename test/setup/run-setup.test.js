@@ -87,6 +87,7 @@ function setup({
   const { exec, calls } = fakeExec({ list });
   const stopCalls = [];
   const rmCalls = [];
+  const ensureCalls = [];
   const env = makeEnv({
     binPath: BIN,
     log: () => {},
@@ -102,8 +103,13 @@ function setup({
         return stop;
       }),
     rm: (p) => rmCalls.push(p),
+    // 진짜 ensureHub 는 임시 홈에 detached 허브를 띄우고 아무도 끄지 않는다(실행마다 3개가 남았다).
+    ensureHub: async ({ home: h }) => {
+      ensureCalls.push(h);
+      return { port: 4242 };
+    },
   });
-  return { user, home, env, calls, stopCalls, rmCalls };
+  return { user, home, env, calls, stopCalls, rmCalls, ensureCalls };
 }
 
 const results = (r) => Object.fromEntries(r.rows.map((x) => [x.id, x.result]));
@@ -131,6 +137,16 @@ async function purgeRun(home, over = {}) {
   });
   return { r, rmCalls: s.rmCalls };
 }
+
+test("install starts the hub through env.ensureHub for the pluriply home, and a dry run does not", async () => {
+  const { home, env, ensureCalls } = setup();
+  const dry = await runSetup({ env, home, dryRun: true });
+  assert.deepEqual(ensureCalls, []);
+  assert.equal(dry.hub, undefined);
+  const r = await runSetup({ env, home });
+  assert.deepEqual(ensureCalls, [home]);
+  assert.deepEqual(r.hub, { port: 4242 });
+});
 
 test("full remove unregisters every client, disables all workers, stops the hub, and prints the note", async () => {
   const { user, home, env, calls, stopCalls, rmCalls } = setup();

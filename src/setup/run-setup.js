@@ -109,7 +109,8 @@ function walkHooks({ targets, rows, e, dryRun, hooks, remove }) {
  * `remove` 면 반대로 등록을 풀고 워커 설정·허브·(purge 시) 데이터까지 정리한다.
  * `--purge` 는 pluriply 홈이 심볼릭 링크면 **링크만 끊고** 링크가 가리키는 디렉터리는 남긴다
  * (그 안의 내용까지 지우려면 실제 경로를 직접 지워야 한다).
- * env.stopHub / env.rm / env.lstat 은 테스트가 주입한다.
+ * env.stopHub / env.ensureHub / env.rm / env.lstat 은 테스트가 주입한다(주입하지 않은 ensureHub 는 진짜
+ * detached 허브를 띄운다 — 테스트가 넣지 않으면 임시 홈에 허브가 남는다).
  * `hooks`(기본 true)는 Claude Code·Codex 의 Stop 훅 등록 여부다(스펙 §6). `--remove` 는 이 값과
  * 무관하게 항상 훅을 제거한다.
  * `hooksOnly`(스펙 §4)는 MCP 등록·워커·허브를 건너뛰고 Stop 훅만 설치(`remove` 면 제거)한다.
@@ -153,7 +154,8 @@ export async function runSetup({
   };
   if (!dryRun) {
     try {
-      out.hub = { port: (await (await hubClient()).ensureHub({ home })).port };
+      const ensure = e.ensureHub ?? (await hubClient()).ensureHub;
+      out.hub = { port: (await ensure({ home })).port };
     } catch (err) {
       out.hubError = err.message;
     }
