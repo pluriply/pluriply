@@ -63,9 +63,19 @@ if (cmd === "hub" && sub === "start") {
       process.exit(0);
     }
     console.log(`pluriply hub listening on ${port}`);
-    const shutdown = async () => {
-      await hub.stop();
+    // Plan 4g: 락이 다른 허브로 넘어가면 허브가 스스로 물러난다(stop 완료 후 이 이벤트).
+    hub.on("orphaned", () => {
+      console.log("pluriply hub: lock taken by another hub; exiting");
       process.exit(0);
+    });
+    // 락 감시가 낸 stop() 과 겹칠 수 있다. stop() 이 거부돼도 unhandled rejection 으로
+    // 죽지 않고 반드시 종료한다(Plan 4g).
+    const shutdown = async () => {
+      try {
+        await hub.stop();
+      } finally {
+        process.exit(0);
+      }
     };
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);

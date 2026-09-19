@@ -8,7 +8,6 @@ function ok(data) {
   };
 }
 
-
 /**
  * MCP 도구 annotations. 클라이언트(특히 codex)는 annotations 가 없는 도구를 "파괴적·외부 접근"으로
  * 간주해 비대화 실행에서 승인을 요구한다(readOnlyHint=false, destructiveHint=true 가 기본값).
@@ -181,17 +180,20 @@ export function registerTools(server, hub, { agent, instanceId }) {
     };
   }
 
-  // 허브가 재시작되면 현재 채널에 다시 참여한다 (hub-client가 reconnected를 낸다)
+  // 허브가 재시작되면 정체성을 다시 알리고, 채널이 있으면 다시 참여한다 (hub-client가 reconnected를 낸다)
   if (typeof hub.on === "function") {
     hub.on("reconnected", async () => {
-      if (!state.currentChannel) return;
       try {
         // duringReconnect: true — 이 리스너 자체가 hub-client의 재접속 배리어이므로,
         // 여기서 나가는 request()가 this.reconnecting을 기다리면 자기 자신을
         // 기다리는 교착 상태가 된다.
-        // 새 소켓은 정체성이 없으므로 channel.join보다 먼저 hello로 인스턴스
-        // ID를 다시 인정받아야 한다(그렇지 않으면 "say hello first").
+        // 새 소켓은 정체성이 없으므로 채널 유무와 관계없이 먼저 hello로 인스턴스
+        // ID를 다시 인정받아야 한다. 채널이 없다고 건너뛰면 이후의 자동 복귀·
+        // join_channel이 도구를 다시 시작할 때까지 "say hello first"로 막힌다.
+        // (hello는 인증이 필요한 요청이라, 토큰이 틀린 연결은 여기서 unauthorized를
+        // 받아 hub-client의 재접속 판정이 그것을 본다.)
         await hello(hub, { agent, worker, instanceId, duringReconnect: true });
+        if (!state.currentChannel) return;
         await hub.request(
           "channel.join",
           { channelCode: state.currentChannel },
@@ -410,7 +412,13 @@ export function registerTools(server, hub, { agent, instanceId }) {
             hint: created.hint ?? `dispatch: ${created.dispatch}`,
           };
         }
-        return waitForTask({ code, taskId, waitS, extra, label: `${to} worker` });
+        return waitForTask({
+          code,
+          taskId,
+          waitS,
+          extra,
+          label: `${to} worker`,
+        });
       },
     ),
   );
@@ -429,7 +437,9 @@ export function registerTools(server, hub, { agent, instanceId }) {
       inputSchema: {
         to: z
           .string()
-          .describe('Tool name (e.g. "codex") or instanceId (e.g. "codex#k7pq")'),
+          .describe(
+            'Tool name (e.g. "codex") or instanceId (e.g. "codex#k7pq")',
+          ),
         request: z
           .string()
           .optional()
