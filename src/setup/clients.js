@@ -310,7 +310,8 @@ function cliClient({
         // 안내만 한다 — 되돌리면 멀쩡한 등록을 지우게 된다.
         if (afterAdd) {
           const r = afterAdd(env);
-          if (!r.ok) env.log(`hint: ${label}: ${r.reason}`);
+          if (!r.ok)
+            env.log(`hint: ${label}: ${r.reason}${r.fix ? ` — ${r.fix}` : ""}`);
           else if (r.changed)
             env.log(`updated ${label}: added missing timeout settings`);
         }
@@ -493,11 +494,14 @@ export const CLIENTS = [
     // codex mcp add 는 타임아웃 플래그가 없어 config.toml 을 직접 편집한다(스펙 §5)
     afterAdd(env) {
       const path = codexConfigPath(env);
+      // present 경로(이미 등록됨)에서 채우지 못했을 때 사용자에게 보여 줄 손 수정 방법
+      const fix = `add \`tool_timeout_sec = ${TOOL_TIMEOUT_SEC}\` and \`startup_timeout_sec = ${CODEX_STARTUP_TIMEOUT_SEC}\` under [mcp_servers.pluriply] by hand in ${path}`;
       try {
         if (!env.fs.existsSync(path))
           return {
             ok: false,
-            reason: `tool_timeout_sec not written (${path} missing)`,
+            fix,
+            reason: `timeout settings not written (${path} missing)`,
           };
         const r = insertTomlKey(
           env.fs.readFileSync(path, "utf8"),
@@ -508,12 +512,14 @@ export const CLIENTS = [
         if (r.reason === "no-header")
           return {
             ok: false,
-            reason: `tool_timeout_sec not written ([mcp_servers.pluriply] not found in ${path})`,
+            fix,
+            reason: `timeout settings not written ([mcp_servers.pluriply] not found in ${path})`,
           };
         if (r.reason === "unsupported")
           return {
             ok: false,
-            reason: `tool_timeout_sec not written (${path} contains triple-quoted strings; add \`tool_timeout_sec = ${TOOL_TIMEOUT_SEC}\` under [mcp_servers.pluriply] by hand)`,
+            fix,
+            reason: `timeout settings not written (${path} contains triple-quoted strings)`,
           };
         // 헤더·트리플쿼트 판정은 파일 단위라 위에서 통과했으면 두 번째 키도 같은 이유로는 실패하지 않는다.
         // 이미 있는 값(사용자가 고친 값 포함)은 건드리지 않는다.
@@ -529,7 +535,8 @@ export const CLIENTS = [
       } catch (err) {
         return {
           ok: false,
-          reason: `tool_timeout_sec not written (${err.message})`,
+          fix,
+          reason: `timeout settings not written (${err.message})`,
         };
       }
     },
@@ -562,12 +569,14 @@ export const CLIENTS = [
     // agy mcp add 도 타임아웃 플래그가 없다. agy 는 JSONC 를 읽지만 우리는 JSON.parse 만 쓴다(스펙 §11).
     afterAdd(env) {
       const path = agyConfigPath(env);
+      const fix = `add \`"timeoutSeconds": ${TOOL_TIMEOUT_SEC}\` to mcpServers.pluriply by hand in ${path}`;
       try {
         const doc = readJsonDoc(env, path);
         const entry = doc.mcpServers?.pluriply;
         if (!entry || typeof entry !== "object")
           return {
             ok: false,
+            fix,
             reason: `timeoutSeconds not written (mcpServers.pluriply not found in ${path})`,
           };
         const changed = entry.timeoutSeconds === undefined;
@@ -579,6 +588,7 @@ export const CLIENTS = [
       } catch (err) {
         return {
           ok: false,
+          fix,
           reason: `timeoutSeconds not written (${err.message})`,
         };
       }

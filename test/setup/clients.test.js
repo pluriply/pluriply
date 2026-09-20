@@ -586,12 +586,12 @@ test("codex register writes tool_timeout_sec and startup_timeout_sec under [mcp_
   const r = byId("codex").register(
     env({ exec, homeDir: home, log: (m) => logs.push(m) }),
   );
-  assert.match(r, /^failed: tool_timeout_sec not written/);
+  assert.match(r, /^failed: timeout settings not written/);
   assert.deepEqual(calls.at(-1), ["codex", "mcp", "remove", "pluriply"]);
   assert.equal(readFileSync(codexToml, "utf8"), 'model = "gpt"\n');
   assert.match(
     logs.at(-1),
-    /could not configure Codex: tool_timeout_sec not written/,
+    /could not configure Codex: timeout settings not written/,
   );
   // 파일 자체가 없어도 롤백. CODEX_HOME 을 따른다.
   const alt = emptyHome();
@@ -599,7 +599,7 @@ test("codex register writes tool_timeout_sec and startup_timeout_sec under [mcp_
     byId("codex").register(
       env({ exec, homeDir: home, processEnv: { CODEX_HOME: alt } }),
     ),
-    /^failed: tool_timeout_sec not written/,
+    /^failed: timeout settings not written/,
   );
   writeFileSync(join(alt, "config.toml"), "[mcp_servers.pluriply]\n");
   assert.equal(
@@ -620,7 +620,7 @@ test("codex register warns when the rollback itself fails, leaving pluriply regi
   const r = byId("codex").register(
     env({ exec, homeDir: emptyHome(), log: (m) => logs.push(m) }),
   );
-  assert.match(r, /^failed: tool_timeout_sec not written/);
+  assert.match(r, /^failed: timeout settings not written/);
   assert.match(logs.at(-1), /registration left in place/);
 });
 
@@ -635,12 +635,12 @@ test("codex register refuses and rolls back when config.toml contains a triple-q
   const r = byId("codex").register(
     env({ exec, homeDir: home, log: (m) => logs.push(m) }),
   );
-  assert.match(r, /^failed: tool_timeout_sec not written .*triple-quoted/);
+  assert.match(r, /^failed: timeout settings not written .*triple-quoted/);
   assert.deepEqual(calls.at(-1), ["codex", "mcp", "remove", "pluriply"]);
   assert.equal(readFileSync(codexToml, "utf8"), withTripleQuotes);
   assert.match(
     logs.at(-1),
-    /could not configure Codex: tool_timeout_sec not written .*triple-quoted/,
+    /could not configure Codex: timeout settings not written .*triple-quoted/,
   );
 });
 
@@ -769,7 +769,11 @@ test("re-running setup on an already registered codex/antigravity fills in missi
   assert.equal(byId("codex").register(e), "present");
   assert.equal(calls.filter((c) => c[2] === "remove").length, 0);
   assert.ok(
-    logs.some((l) => /hint: .*tool_timeout_sec not written/.test(l)),
+    logs.some((l) =>
+      /hint: Codex: timeout settings not written .*add `tool_timeout_sec = 600` and `startup_timeout_sec = 30` under \[mcp_servers\.pluriply\] by hand/.test(
+        l,
+      ),
+    ),
     logs.join("\n"),
   );
 });
