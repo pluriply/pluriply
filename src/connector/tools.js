@@ -54,6 +54,9 @@ function staleHubMessage(stale) {
 /** 허브가 hello 하지 않은 연결의 요청을 거절할 때 쓰는 문구(server.js #conn) */
 const UNIDENTIFIED = "say hello first";
 
+/** 채널 문서가 없을 때의 허브 오류(channels.js ChannelNotFound) */
+const CHANNEL_GONE = /^channel not found: /;
+
 /**
  * hub-client 자신이 내는 연결 오류(허브의 거절이 아니다). 원인이 정체성이 아니므로 "정체성을
  * 잃었다"로 감싸지 않고 원래 오류를 그대로 알린다: 끊김·시간 초과는 재접속 리스너가 곧
@@ -139,11 +142,41 @@ export function registerTools(server, hub, { agent, instanceId }) {
   /** 진행 중인 정체성 복구. 동시에 거절된 요청들이 hello 하나를 같이 기다린다. */
   let recovering = null;
   /**
-   * 재접속 리스너의 hello 가 실패해 이 소켓에 정체성이 없다고 알고 있는 상태. 조회 도구가 쓰는
-   * 허브 요청(channel.peers·task.list 등)은 정체성 없이도 통과하므로, 거절을 기다리면 복구가
-   * 일어나지 않고 이 인스턴스가 동료에게 offline 으로 남는다 — 그래서 요청 전에 먼저 복구한다.
+   * 이 소켓의 정체성이나 채널 참여가 빠졌다고 알고 있는 상태(재접속·복구의 hello 또는 재참여가
+   * 실패했다). 조회 도구가 쓰는 허브 요청(channel.peers·task.list 등)은 정체성·참여 없이도
+   * 통과하므로, 거절을 기다리면 복구가 일어나지 않고 이 인스턴스가 동료에게 offline 으로 남는다
+   * (이 도구로 오는 태스크도 대화형 세션 대신 워커로 갈 수 있다) — 그래서 요청 전에 먼저 복구한다.
+   * hello 와 재참여가 모두 끝나야 내린다: 끝나 가는 복구를 재사용하는 사이 재접속이 끼어도
+   * 표시가 잘못 내려가지 않는다.
    */
-  let identityLost = false;
+  let needsRecover = false;
+
+  /**
+   * 참여 중이던 채널에 다시 들어가고 결과를 상태에 반영한다.
+   * - 채널이 사라졌으면 currentChannel 을 비워 다음 호출이 자동 복귀·"Join a channel first" 로
+   *   알리게 한다(기다리는 사이 join_channel 이 다른 채널로 바꿨으면 그대로 둔다).
+   * - 연결 오류(끊김 등)나, 복구 도중 재접속이 끼어 아직 정체성 없는 새 소켓으로 나간 경우
+   *   ("say hello first")는 다시 보내면 되므로 needsRecover 로 남겨 다음 호출이 다시 시도한다.
+   * - 그 밖의 거절(예: 손상된 채널 문서)은 다시 보내도 같으니 표시를 내린다 — 남기면 세션 내내
+   *   요청마다 왕복이 붙는다. 채널은 유지해 이후 요청이 실제 오류를 보이게 한다.
+   * @param {{duringReconnect?: boolean}} [opts] @returns {Promise<boolean>} 다시 들어갔으면 true
+   */
+  async function restoreChannel(opts) {
+    const code = state.currentChannel;
+    try {
+      const joined = await rejoin(opts);
+      needsRecover = false;
+      return joined;
+    } catch (err) {
+      if (CHANNEL_GONE.test(err.message)) {
+        if (state.currentChannel === code) state.currentChannel = null;
+        needsRecover = false;
+      } else
+        needsRecover =
+          HUB_CLIENT_ERROR.test(err.message) || err.message === UNIDENTIFIED;
+      return false;
+    }
+  }
 
   /**
    * 정체성을 되살리고 참여 중이던 채널에 다시 들어간다(hello 는 연결당 멱등).
@@ -156,12 +189,11 @@ export function registerTools(server, hub, { agent, instanceId }) {
       try {
         await helloAgain();
       } catch (err) {
+        needsRecover = true;
         if (HUB_CLIENT_ERROR.test(err.message)) throw err;
         throw new IdentityLostError(err.message);
       }
-      identityLost = false;
-      // 채널이 사라졌으면 다시 보낸 요청(또는 다음 호출)이 알려준다
-      await rejoin().catch(() => {});
+      await restoreChannel();
     })().finally(() => {
       recovering = null;
     });
@@ -169,14 +201,15 @@ export function registerTools(server, hub, { agent, instanceId }) {
   }
 
   /**
-   * hub.request 와 같되 이 소켓의 정체성을 지킨다. 정체성을 잃은 것을 알면 보내기 전에 복구하고,
+   * hub.request 와 같되 이 소켓의 정체성을 지킨다. 정체성·참여가 빠진 것을 알면 보내기 전에
+   * 복구하고(재참여가 계속 실패하면 두 번까지만 — 요청은 그대로 보내고 다음 호출이 다시 시도한다),
    * 허브가 "say hello first" 로 거절하면 복구한 뒤 한 번만 다시 보낸다. 허브는 정체성이 필요한
    * 요청을 첫 줄(#conn)에서 거절하므로 다시 보내도 중복 부작용이 없다.
    * 재접속 리스너의 duringReconnect 요청은 이 경로를 타지 않는다.
    * @type {typeof hub.request}
    */
   async function hubRequest(type, payload, opts) {
-    if (identityLost) await recover();
+    for (let i = 0; needsRecover && i < 2; i++) await recover();
     try {
       return await hub.request(type, payload, opts);
     } catch (err) {
@@ -306,18 +339,14 @@ export function registerTools(server, hub, { agent, instanceId }) {
         // 받아 hub-client의 재접속 판정이 그것을 본다.)
         // recover() 의 공유 promise 는 쓰지 않는다(교착 — recover 주석 참고).
         await helloAgain({ duringReconnect: true });
-        identityLost = false;
       } catch {
         // 다음 도구 호출이 요청을 보내기 전에 hubRequest() 에서 복구한다
-        identityLost = true;
+        needsRecover = true;
         return;
       }
-      try {
-        if (await rejoin({ duringReconnect: true }))
-          hub.emit("rejoined", state.currentChannel);
-      } catch {
-        // 채널이 사라졌으면 다음 도구 호출이 알려준다
-      }
+      // 재참여 실패도 needsRecover 로 남기고, 채널이 사라졌으면 currentChannel 을 비운다
+      if (await restoreChannel({ duringReconnect: true }))
+        hub.emit("rejoined", state.currentChannel);
     });
   }
 
