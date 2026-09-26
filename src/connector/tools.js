@@ -51,6 +51,28 @@ function staleHubMessage(stale) {
   );
 }
 
+/** 허브가 hello 하지 않은 연결의 요청을 거절할 때 쓰는 문구(server.js #conn) */
+const UNIDENTIFIED = "say hello first";
+
+/**
+ * hub-client 자신이 내는 연결 오류(허브의 거절이 아니다). 원인이 정체성이 아니므로 "정체성을
+ * 잃었다"로 감싸지 않고 원래 오류를 그대로 알린다: 끊김·시간 초과는 재접속 리스너가 곧
+ * 되살리고, unreachable(dead)은 이미 원인(예: unauthorized)과 재시작 안내를 담고 있다.
+ */
+const HUB_CLIENT_ERROR =
+  /^hub (connection closed|connection error|request timed out|unreachable)/;
+
+/** 정체성을 되살리지 못했다 — 도구를 다시 시작해야 한다(안내 문구를 다른 안내로 감싸지 않게 구분한다) */
+class IdentityLostError extends Error {
+  /** @param {string} reason */
+  constructor(reason) {
+    super(
+      `Pluriply lost this session's identity on the hub connection and could not restore it (${reason}). ` +
+        "Restart this AI tool (or reload its MCP server) to reconnect.",
+    );
+  }
+}
+
 /**
  * 허브에 정체성을 알리고 인스턴스 ID를 받는다. 재접속 때는 알고 있는 ID를 실어 그대로 인정받는다.
  * @param {import('./hub-client.js').HubClient} hub
@@ -90,12 +112,92 @@ export function registerTools(server, hub, { agent, instanceId }) {
   const delegationDepth = () =>
     worker ? Number(process.env.PLURIPLY_DEPTH ?? 0) + 1 : 0;
 
+  /** 이 소켓에 알고 있는 instanceId 로 정체성을 다시 알린다 @param {{duringReconnect?: boolean}} [opts] */
+  async function helloAgain(opts = {}) {
+    state.instanceId = await hello(hub, {
+      agent,
+      worker,
+      instanceId: state.instanceId,
+      ...opts,
+    });
+  }
+
+  /**
+   * 참여 중이던 채널에 이 소켓으로 다시 들어간다.
+   * @param {{duringReconnect?: boolean}} [opts] @returns {Promise<boolean>} 채널이 없으면 false
+   */
+  async function rejoin(opts = {}) {
+    if (!state.currentChannel) return false;
+    await hub.request(
+      "channel.join",
+      { channelCode: state.currentChannel },
+      opts,
+    );
+    return true;
+  }
+
+  /** 진행 중인 정체성 복구. 동시에 거절된 요청들이 hello 하나를 같이 기다린다. */
+  let recovering = null;
+  /**
+   * 재접속 리스너의 hello 가 실패해 이 소켓에 정체성이 없다고 알고 있는 상태. 조회 도구가 쓰는
+   * 허브 요청(channel.peers·task.list 등)은 정체성 없이도 통과하므로, 거절을 기다리면 복구가
+   * 일어나지 않고 이 인스턴스가 동료에게 offline 으로 남는다 — 그래서 요청 전에 먼저 복구한다.
+   */
+  let identityLost = false;
+
+  /**
+   * 정체성을 되살리고 참여 중이던 채널에 다시 들어간다(hello 는 연결당 멱등).
+   * 재접속 리스너는 이 공유 promise 를 쓰면 안 된다 — 여기서 나가는 요청은 재접속 배리어를
+   * 기다리고, 배리어는 리스너가 끝나기를 기다리므로 서로를 기다리는 교착이 된다.
+   * @returns {Promise<void>} hello 가 허브에 거절되면 IdentityLostError, 연결 오류면 그 오류 그대로
+   */
+  function recover() {
+    recovering ??= (async () => {
+      try {
+        await helloAgain();
+      } catch (err) {
+        if (HUB_CLIENT_ERROR.test(err.message)) throw err;
+        throw new IdentityLostError(err.message);
+      }
+      identityLost = false;
+      // 채널이 사라졌으면 다시 보낸 요청(또는 다음 호출)이 알려준다
+      await rejoin().catch(() => {});
+    })().finally(() => {
+      recovering = null;
+    });
+    return recovering;
+  }
+
+  /**
+   * hub.request 와 같되 이 소켓의 정체성을 지킨다. 정체성을 잃은 것을 알면 보내기 전에 복구하고,
+   * 허브가 "say hello first" 로 거절하면 복구한 뒤 한 번만 다시 보낸다. 허브는 정체성이 필요한
+   * 요청을 첫 줄(#conn)에서 거절하므로 다시 보내도 중복 부작용이 없다.
+   * 재접속 리스너의 duringReconnect 요청은 이 경로를 타지 않는다.
+   * @type {typeof hub.request}
+   */
+  async function hubRequest(type, payload, opts) {
+    if (identityLost) await recover();
+    try {
+      return await hub.request(type, payload, opts);
+    } catch (err) {
+      if (err.message !== UNIDENTIFIED) throw err;
+    }
+    await recover();
+    try {
+      return await hub.request(type, payload, opts);
+    } catch (err) {
+      if (err.message === UNIDENTIFIED)
+        throw new IdentityLostError(err.message);
+      throw err;
+    }
+  }
+
   /**
    * 채널이 없을 때 허브에 직전 채널 복귀를 요청한다.
    * @returns {Promise<string|null>} 복귀한 채널 코드
    */
   async function resumeChannel() {
-    const { channelCode } = await hub.request("agent.resume", {});
+    const { channelCode } = await hubRequest("agent.resume", {});
     if (!channelCode) return null;
     if (state.currentChannel) return null; // join_channel이 경합에서 이겼으니 그대로 둔다
     state.currentChannel = channelCode;
@@ -113,6 +215,8 @@ export function registerTools(server, hub, { agent, instanceId }) {
       try {
         resumed = await resumeChannel();
       } catch (err) {
+        // join_channel 도 같은 이유로 실패하므로 그쪽을 권하지 않고 재시작 안내만 낸다
+        if (err instanceof IdentityLostError) return fail(err.message);
         return fail(
           `Join a channel first with join_channel. (auto-resume failed: ${err.message})`,
         );
@@ -147,7 +251,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
         const timeoutMs = Math.min(ASK_CHUNK_MS, remaining);
-        ({ task } = await hub.request(
+        ({ task } = await hubRequest(
           "task.wait",
           { channelCode: code, taskId, timeoutMs },
           { timeoutMs: timeoutMs + 5000 },
@@ -200,19 +304,17 @@ export function registerTools(server, hub, { agent, instanceId }) {
         // join_channel이 도구를 다시 시작할 때까지 "say hello first"로 막힌다.
         // (hello는 인증이 필요한 요청이라, 토큰이 틀린 연결은 여기서 unauthorized를
         // 받아 hub-client의 재접속 판정이 그것을 본다.)
-        state.instanceId = await hello(hub, {
-          agent,
-          worker,
-          instanceId: state.instanceId,
-          duringReconnect: true,
-        });
-        if (!state.currentChannel) return;
-        await hub.request(
-          "channel.join",
-          { channelCode: state.currentChannel },
-          { duringReconnect: true },
-        );
-        hub.emit("rejoined", state.currentChannel);
+        // recover() 의 공유 promise 는 쓰지 않는다(교착 — recover 주석 참고).
+        await helloAgain({ duringReconnect: true });
+        identityLost = false;
+      } catch {
+        // 다음 도구 호출이 요청을 보내기 전에 hubRequest() 에서 복구한다
+        identityLost = true;
+        return;
+      }
+      try {
+        if (await rejoin({ duringReconnect: true }))
+          hub.emit("rejoined", state.currentChannel);
       } catch {
         // 채널이 사라졌으면 다음 도구 호출이 알려준다
       }
@@ -234,8 +336,8 @@ export function registerTools(server, hub, { agent, instanceId }) {
       if (hub.stale) return fail(staleHubMessage(hub.stale));
       try {
         const code =
-          channel_code ?? (await hub.request("channel.create")).channelCode;
-        const { peers } = await hub.request("channel.join", {
+          channel_code ?? (await hubRequest("channel.create")).channelCode;
+        const { peers } = await hubRequest("channel.join", {
           channelCode: code,
         });
         state.currentChannel = code;
@@ -255,7 +357,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       inputSchema: {},
     },
     needChannel((_args, code) =>
-      hub.request("channel.peers", { channelCode: code }),
+      hubRequest("channel.peers", { channelCode: code }),
     ),
   );
 
@@ -268,15 +370,15 @@ export function registerTools(server, hub, { agent, instanceId }) {
       inputSchema: {},
     },
     needChannel(async (_args, code) => {
-      const { peers } = await hub.request("channel.peers", {
+      const { peers } = await hubRequest("channel.peers", {
         channelCode: code,
       });
-      const { tasks } = await hub.request("task.list", {
+      const { tasks } = await hubRequest("task.list", {
         channelCode: code,
         to: state.instanceId,
         status: "submitted",
       });
-      const { running } = await hub.request("worker.status", {
+      const { running } = await hubRequest("worker.status", {
         channelCode: code,
       });
       return {
@@ -335,7 +437,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
         { to, request, attachments = [], mode = "auto", cwd = process.cwd() },
         code,
       ) =>
-        hub.request("task.create", {
+        hubRequest("task.create", {
           channelCode: code,
           to,
           request,
@@ -399,7 +501,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
             `ask_agent takes a tool name (e.g. "codex"); use send_task to pin an instance like "${to}"`,
           );
         const waitS = clampWaitSeconds(wait_seconds);
-        const created = await hub.request("task.create", {
+        const created = await hubRequest("task.create", {
           channelCode: code,
           to,
           request,
@@ -412,13 +514,11 @@ export function registerTools(server, hub, { agent, instanceId }) {
         const { taskId } = created;
         if (created.dispatch !== "spawned" && created.dispatch !== "queued") {
           // 워커가 뜨지 않았다: 쓰레기 submitted 태스크를 남기지 않는다
-          await hub
-            .request("task.cancel", {
-              channelCode: code,
-              taskId,
-              reason: "ask_agent: worker not started",
-            })
-            .catch(() => {});
+          await hubRequest("task.cancel", {
+            channelCode: code,
+            taskId,
+            reason: "ask_agent: worker not started",
+          }).catch(() => {});
           return {
             status: "not_started",
             taskId,
@@ -510,7 +610,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
         if (git_range !== undefined) review.gitRange = git_range;
         if (paths !== undefined) review.paths = paths;
         if (focus !== undefined) review.focus = focus;
-        const created = await hub.request("task.create", {
+        const created = await hubRequest("task.create", {
           channelCode: code,
           to,
           request: request ?? "",
@@ -525,13 +625,11 @@ export function registerTools(server, hub, { agent, instanceId }) {
         if (wait_seconds === undefined) return created;
         const { taskId } = created;
         if (created.dispatch === "none") {
-          await hub
-            .request("task.cancel", {
-              channelCode: code,
-              taskId,
-              reason: "request_review: worker not started",
-            })
-            .catch(() => {});
+          await hubRequest("task.cancel", {
+            channelCode: code,
+            taskId,
+            reason: "request_review: worker not started",
+          }).catch(() => {});
           return {
             status: "not_started",
             taskId,
@@ -567,7 +665,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(({ task_id, reason }, code) =>
-      hub.request("task.cancel", {
+      hubRequest("task.cancel", {
         channelCode: code,
         taskId: task_id,
         reason,
@@ -602,7 +700,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     },
     needChannel(
       ({ status, mine_only = true, sent_by_me = false, kind }, code) =>
-        hub.request("task.list", {
+        hubRequest("task.list", {
           channelCode: code,
           to: sent_by_me ? undefined : mine_only ? state.instanceId : undefined,
           from: sent_by_me ? state.instanceId : undefined,
@@ -621,7 +719,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       inputSchema: { task_id: z.string() },
     },
     needChannel(({ task_id }, code) =>
-      hub.request("task.get", { channelCode: code, taskId: task_id }),
+      hubRequest("task.get", { channelCode: code, taskId: task_id }),
     ),
   );
 
@@ -645,17 +743,17 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(async ({ task_id, result, failed = false }, code) => {
-      const { task } = await hub.request("task.get", {
+      const { task } = await hubRequest("task.get", {
         channelCode: code,
         taskId: task_id,
       });
       if (task.status === "submitted") {
-        await hub.request("task.claim", {
+        await hubRequest("task.claim", {
           channelCode: code,
           taskId: task_id,
         });
       }
-      return hub.request("task.complete", {
+      return hubRequest("task.complete", {
         channelCode: code,
         taskId: task_id,
         result,
@@ -691,14 +789,14 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(async ({ task_id, verdict, findings = [], summary }, code) => {
-      const { task } = await hub.request("task.get", {
+      const { task } = await hubRequest("task.get", {
         channelCode: code,
         taskId: task_id,
       });
       if (task.status === "submitted") {
-        await hub.request("task.claim", { channelCode: code, taskId: task_id });
+        await hubRequest("task.claim", { channelCode: code, taskId: task_id });
       }
-      return hub.request("task.complete", {
+      return hubRequest("task.complete", {
         channelCode: code,
         taskId: task_id,
         status: "completed",
@@ -722,7 +820,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(({ summary, artifacts = [] }, code) =>
-      hub.request("context.add", {
+      hubRequest("context.add", {
         channelCode: code,
         summary,
         artifacts,
@@ -744,7 +842,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(({ limit }, code) =>
-      hub.request("context.list", { channelCode: code, limit }),
+      hubRequest("context.list", { channelCode: code, limit }),
     ),
   );
 }
