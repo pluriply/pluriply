@@ -1,5 +1,11 @@
 import { z } from "zod";
 import { makeWaitForActivity } from "./wait.js";
+import {
+  threadIdFromExtra,
+  codexWakeEnabled,
+  startCodexWake,
+  runCodexQueue,
+} from "./codex-wake.js";
 
 /** @param {object} data @returns {object} MCP 텍스트 결과 */
 function ok(data) {
@@ -96,6 +102,8 @@ export async function hello(
       cwd: process.cwd(),
       worker,
       instanceId: instanceId ?? undefined,
+      // 커넥터를 띄운 도구 프로세스 — 같은 세션의 Stop 훅이 같은 값을 보내 허브가 짝을 찾는다
+      hostPid: process.ppid,
     },
     { duringReconnect },
   );
@@ -106,12 +114,29 @@ export async function hello(
  * Pluriply MCP 도구를 등록한다.
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
  * @param {import('./hub-client.js').HubClient} hub
- * @param {{agent: string, instanceId: string|null}} identity instanceId 는 구버전 허브로 시작하면 null 이다.
+ * @param {{agent: string, instanceId: string|null, env?: NodeJS.ProcessEnv, queue?: typeof runCodexQueue, wakeChunkMs?: number}} identity instanceId 는 구버전 허브로 시작하면 null 이다. env·queue·wakeChunkMs 는 테스트가 주입한다(wakeChunkMs 는 startCodexWake 의 agent.wait 청크 길이 — 기본값은 undefined 로 두어 startCodexWake 자신의 기본값(WAKE_CHUNK_MS)을 쓴다).
+ * @returns {{stopWake(): void}}
  */
-export function registerTools(server, hub, { agent, instanceId }) {
+export function registerTools(
+  server,
+  hub,
+  { agent, instanceId, env = process.env, queue = runCodexQueue, wakeChunkMs },
+) {
   /** instanceId 는 재접속 hello 가 돌려준 값으로 갱신된다(구버전 허브로 시작해 null 이었던 경우). */
-  const state = { currentChannel: null, instanceId };
+  const state = { currentChannel: null, instanceId, threadId: null };
   const worker = Boolean(process.env.PLURIPLY_WORKER_TASK);
+  // Plan 5b: `pluriply codex` 세션이면 codex queue 로 스스로 깨운다
+  const autoWake = codexWakeEnabled({ agent, env, stale: hub.stale });
+  /**
+   * 도구를 등록하되, 호출마다 Codex 가 _meta 에 싣는 스레드 ID 를 기록한다. 인자 스키마가 없는
+   * 도구는 핸들러가 (extra) 하나만 받으므로 마지막 인자를 extra 로 본다.
+   */
+  const register = (name, def, handler) =>
+    server.registerTool(name, def, (...a) => {
+      const tid = threadIdFromExtra(a[a.length - 1]);
+      if (tid) state.threadId = tid;
+      return handler(...a);
+    });
   /** 워커는 자기 태스크 깊이 + 1, 대화형 세션은 0 */
   const delegationDepth = () =>
     worker ? Number(process.env.PLURIPLY_DEPTH ?? 0) + 1 : 0;
@@ -226,14 +251,21 @@ export function registerTools(server, hub, { agent, instanceId }) {
     }
   }
 
-  /** Claude Code 는 wait_for_activity 가 쉬는 세션을 깨우므로 위임 응답에서 안내한다(Plan 5a D5) */
+  /** 위임 응답의 깨우기 안내: Claude Code 는 wait_for_activity(Plan 5a D5), `pluriply codex` 는 자동(Plan 5b) */
   const withNotify = (data) =>
-    agent === "claude-code"
+    autoWake
       ? {
           ...data,
-          notify: "Call wait_for_activity to be woken when the result arrives.",
+          notify:
+            "This session will be woken automatically when the result arrives.",
         }
-      : data;
+      : agent === "claude-code"
+        ? {
+            ...data,
+            notify:
+              "Call wait_for_activity to be woken when the result arrives.",
+          }
+        : data;
 
   /**
    * 채널이 없을 때 허브에 직전 채널 복귀를 요청한다.
@@ -360,7 +392,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     });
   }
 
-  server.registerTool(
+  register(
     "join_channel",
     {
       annotations: annotations({ idempotentHint: true }),
@@ -391,7 +423,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
   const waitForActivityChannel = needChannel((args, code, extra) =>
     waitForActivity(args, code, extra),
   );
-  server.registerTool(
+  register(
     "wait_for_activity",
     {
       annotations: annotations({ readOnlyHint: true }),
@@ -403,13 +435,19 @@ export function registerTools(server, hub, { agent, instanceId }) {
       inputSchema: { wait_seconds: z.number().optional() },
     },
     // worker 는 채널이 없어도 즉시 거절한다(needChannel 앞에서 검사 — 자동 복귀 왕복 없이).
+    // `pluriply codex` 세션은 뒤의 깨우기 루프가 대기하므로 여기서 기다리지 않는다(Plan 5b §6.3).
     (args, extra) =>
       worker
         ? fail("wait_for_activity is for interactive sessions")
-        : waitForActivityChannel(args, extra),
+        : autoWake
+          ? ok({
+              status: "auto",
+              next: "This Codex session is woken automatically when tasks or results arrive. End your turn instead of waiting.",
+            })
+          : waitForActivityChannel(args, extra),
   );
 
-  server.registerTool(
+  register(
     "list_peers",
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
@@ -422,7 +460,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "channel_status",
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
@@ -451,7 +489,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     }),
   );
 
-  server.registerTool(
+  register(
     "send_task",
     {
       annotations: annotations(),
@@ -513,7 +551,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "ask_agent",
     {
       annotations: annotations(),
@@ -599,7 +637,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "request_review",
     {
       annotations: annotations(),
@@ -715,7 +753,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "cancel_task",
     {
       annotations: annotations({ idempotentHint: true }),
@@ -736,7 +774,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "list_tasks",
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
@@ -775,7 +813,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "get_task_result",
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
@@ -788,7 +826,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "submit_result",
     {
       annotations: annotations({ idempotentHint: true }),
@@ -827,7 +865,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     }),
   );
 
-  server.registerTool(
+  register(
     "submit_review",
     {
       annotations: annotations({ idempotentHint: true }),
@@ -870,7 +908,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     }),
   );
 
-  server.registerTool(
+  register(
     "share_update",
     {
       annotations: annotations(),
@@ -893,7 +931,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
     ),
   );
 
-  server.registerTool(
+  register(
     "get_channel_context",
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
@@ -910,4 +948,23 @@ export function registerTools(server, hub, { agent, instanceId }) {
       hubRequest("context.list", { channelCode: code, limit }),
     ),
   );
+
+  // Plan 5b: 깨우기 루프. 채널이 없으면 직전 채널로 돌아가 참여한 채 기다린다.
+  const wake = autoWake
+    ? startCodexWake({
+        hubRequest,
+        state,
+        remote: env.PLURIPLY_CODEX_REMOTE,
+        queue,
+        chunkMs: wakeChunkMs,
+        prepare: async () => {
+          if (!state.currentChannel) await resumeChannel();
+        },
+      })
+    : null;
+  return {
+    stopWake() {
+      wake?.stop();
+    },
+  };
 }

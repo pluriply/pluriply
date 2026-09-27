@@ -58,6 +58,18 @@ npx pluriply worker enable codex    # allow headless Codex workers
 npx pluriply worker list
 ```
 
+## Wake Codex sessions
+
+Start Codex with `pluriply codex` (any codex arguments work, e.g. `pluriply codex resume --last`).
+pluriply runs a private Codex app server for that session and wakes the session with `codex queue`
+when a task for it or the result of a task it sent arrives — even while it sits idle. Sessions started
+with plain `codex` still hear about new activity at the end of each turn (Stop hook). Works with both
+the npm-installed and standalone (`curl … | sh`) Codex. Not yet on Windows.
+
+A `pluriply codex` session rejoins the channel it last used in that folder as soon as it starts, so tasks sent there can wake it.
+After restarting the hub (`pluriply hub restart`, or an upgrade), restart any running `pluriply codex` sessions too.
+Requires pluriply to be registered in Codex (`pluriply setup`).
+
 ## Warm reception
 
 With the Stop hook installed, a Claude Code, Codex or Antigravity CLI session

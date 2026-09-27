@@ -299,7 +299,7 @@ async function runRemove({ targets, only, dryRun, purge, e, home }) {
     out.hubError = err.message;
     out.failed++;
   }
-  if (out.hub === "timeout") {
+  if (out.hub === "timeout" || out.hub === "unresponsive") {
     out.hubPid = readLock(home)?.pid;
     out.failed++;
   } else if (out.hub && purge) {
@@ -336,6 +336,15 @@ function hookLines(hookRows) {
       `hooks ${row.id.padEnd(12)} ${row.installed ? "installed    " : "not installed"} ${row.result}`,
   );
 }
+/** Plan 5b: Codex 가 설치돼 있으면 깨울 수 있는 실행 방법을 알린다. @param {object[]} rows */
+function codexLaunchHint(rows) {
+  return (rows ?? []).some((x) => x.id === "codex" && x.installed)
+    ? [
+        "hint: start Codex with `pluriply codex` to let pluriply wake it when tasks or results arrive",
+      ]
+    : [];
+}
+
 /** Codex 는 새 훅을 다음 세션에서 신뢰 승인해야 한다 — 새로 쓰였을 때만 안내한다. @param {object[]} hookRows */
 function codexTrustHint(hookRows) {
   return (hookRows ?? []).some(
@@ -372,6 +381,10 @@ export function formatSetup(r, { workers = false } = {}) {
       lines.push(
         `hub: failed to stop within 5s (pid ${r.hubPid ?? "unknown"})`,
       );
+    else if (r.hub === "unresponsive")
+      lines.push(
+        `hub: not answering (pid ${r.hubPid ?? "unknown"}); left running`,
+      );
     else if (r.hubError) lines.push(`hub: could not stop (${r.hubError})`);
     if (r.purge) lines.push(`purge: ${r.purge}`);
     if (r.purgeError) lines.push(`purge: refused (${r.purgeError})`);
@@ -390,6 +403,7 @@ export function formatSetup(r, { workers = false } = {}) {
         `hint: run \`pluriply worker enable <${cli.join("|")}>\` to let the hub run that tool headlessly (or re-run setup --workers)`,
       );
   }
+  lines.push(...codexLaunchHint(r.rows));
   lines.push(...codexTrustHint(r.hookRows));
   return lines;
 }

@@ -88,9 +88,23 @@ export async function runStopHook({
         }
         return null;
       }
+      // sessionId: 도구의 세션(Codex 는 스레드) ID — 허브가 짝지은 세션에 보관해 `pluriply codex`
+      // 세션을 codex queue 로 깨운다(Plan 5b).
+      const sessionId =
+        typeof data.session_id === "string" && data.session_id.length > 0
+          ? data.session_id
+          : undefined;
       return client.request(
         "hook.poll",
-        { tool: agent, cwd: at },
+        // hostPid: 이 훅을 띄운 도구 프로세스. 같은 세션의 커넥터도 그 자식이라(Claude Code·Codex
+        // 실측) 허브가 어느 인스턴스의 훅인지 가려 그 세션 몫만 준다. 환경 변수(CLAUDE_PID 등)는
+        // 도구 안에서 다른 도구를 띄우면 상속돼 믿을 수 없다.
+        {
+          tool: agent,
+          cwd: at,
+          hostPid: process.ppid,
+          ...(sessionId ? { sessionId } : {}),
+        },
         { timeoutMs },
       );
     })();

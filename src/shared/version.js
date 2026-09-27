@@ -16,5 +16,6 @@ export const PACKAGE_VERSION = pkg.version;
  * 6: Plan 3b (task.kind/review, task.complete의 review, task.list의 kind).
  * 7: Plan 4f (연결 토큰 — ping 외 모든 요청은 Authorization: Bearer <token> 연결에서만 처리).
  * 8: Plan 5a (agent.wait 보류 요청, 태스크 dispatch·fallback 기록, 활동 응답의 stalled).
+ * 9: Plan 5b (hook.poll의 sessionId로 연결의 threadId 보관, agent.wait의 threadId·requireThread).
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;

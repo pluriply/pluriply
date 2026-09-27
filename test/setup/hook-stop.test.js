@@ -120,7 +120,13 @@ test("runStopHook blocks with the reason when the hub has items, and swallows er
   const fake = (reply) => async () => ({
     request: async (type, payload) => {
       assert.equal(type, "hook.poll");
-      assert.deepEqual(payload, { tool: "codex", cwd: "/repo" });
+      // hostPid: 훅을 띄운 도구 프로세스 — 같은 세션의 커넥터도 그 자식이라 허브가 인스턴스를 가린다
+      const { sessionId: _s, ...rest } = payload;
+      assert.deepEqual(rest, {
+        tool: "codex",
+        cwd: "/repo",
+        hostPid: process.ppid,
+      });
       return typeof reply === "function" ? reply() : reply;
     },
     close() {
@@ -313,7 +319,12 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
   const fake = (reply) => async () => ({
     request: async (type, payload) => {
       assert.equal(type, "hook.poll");
-      assert.deepEqual(payload, { tool: "antigravity", cwd: "/ws" });
+      const { sessionId: _s, ...rest } = payload;
+      assert.deepEqual(rest, {
+        tool: "antigravity",
+        cwd: "/ws",
+        hostPid: process.ppid,
+      });
       return typeof reply === "function" ? reply() : reply;
     },
     close() {
@@ -331,7 +342,12 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
   // workspacePaths 가 없으면 cwd 인자를 쓴다
   const fake2 = async () => ({
     request: async (type, payload) => {
-      assert.deepEqual(payload, { tool: "antigravity", cwd: "/fallback" });
+      const { sessionId: _s, ...rest } = payload;
+      assert.deepEqual(rest, {
+        tool: "antigravity",
+        cwd: "/fallback",
+        hostPid: process.ppid,
+      });
       return { ...poll, tool: "antigravity" };
     },
     close() {},
@@ -343,4 +359,33 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
     connect: fake2,
   });
   assert.equal(r2.decision, "continue");
+});
+
+test("runStopHook passes the tool's session id so the hub can wake that Codex thread", async () => {
+  const seen = [];
+  const connect = async () => ({
+    request: async (_type, payload) => {
+      seen.push(payload);
+      return { channelCode: null, incoming: [], results: [], stalled: [] };
+    },
+    close() {},
+  });
+  await runStopHook({
+    agent: "codex",
+    input: JSON.stringify({ cwd: "/repo", session_id: "019a-t" }),
+    connect,
+  });
+  await runStopHook({
+    agent: "codex",
+    input: JSON.stringify({ cwd: "/repo", session_id: "" }),
+    connect,
+  });
+  await runStopHook({
+    agent: "codex",
+    input: JSON.stringify({ cwd: "/repo" }),
+    connect,
+  });
+  assert.equal(seen[0].sessionId, "019a-t");
+  assert.equal("sessionId" in seen[1], false);
+  assert.equal("sessionId" in seen[2], false);
 });

@@ -358,6 +358,21 @@ test("purge removes the pluriply home after the hub stopped or was not running, 
   assert.ok(
     formatSetup(r).includes("hub: failed to stop within 5s (pid 4242)"),
   );
+
+  // 답하지 않는 살아 있는 허브: 홈을 지우지 않는다(허브는 그대로 돈다)
+  const d = setup({ stop: "unresponsive" });
+  writeFileSync(
+    join(d.home, "hub.json"),
+    JSON.stringify({ pid: 4343, port: 1 }),
+  );
+  r = await runSetup({ remove: true, purge: true, env: d.env, home: d.home });
+  assert.equal(r.hub, "unresponsive");
+  assert.equal(r.failed, 1);
+  assert.equal(r.purge, undefined);
+  assert.deepEqual(d.rmCalls, []);
+  assert.ok(
+    formatSetup(r).includes("hub: not answering (pid 4343); left running"),
+  );
 });
 
 test("absent, corrupt, and not-installed clients are reported without stopping the run", async () => {
@@ -605,6 +620,16 @@ test("setup installs Stop hooks for claude-code and codex by default, reports th
     antigravity: "present",
   });
   assert.ok(!formatSetup(again).some((l) => l.startsWith("hint: Codex asks")));
+});
+
+test("setup suggests `pluriply codex` when Codex is installed", async () => {
+  const { home, env } = setup();
+  const r = await runSetup({ env, home });
+  assert.ok(
+    formatSetup(r).includes(
+      "hint: start Codex with `pluriply codex` to let pluriply wake it when tasks or results arrive",
+    ),
+  );
 });
 
 test("setup --no-hooks skips hooks, --dry-run plans them, --only limits them, and hooks are not attempted for tools that are not installed", async () => {

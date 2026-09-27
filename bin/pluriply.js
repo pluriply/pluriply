@@ -88,7 +88,13 @@ if (cmd === "hub" && sub === "start") {
   const result = await stopHub({ home });
   if (result === "not-running") console.log("not running");
   else if (result === "stopped") console.log("hub stopped");
-  else {
+  else if (result === "unresponsive") {
+    const lock = readLock(home);
+    console.error(
+      `hub is not answering (pid ${lock?.pid ?? "unknown"}); left it running. If no hub is running, \`pluriply hub start\` replaces the lock.`,
+    );
+    process.exit(1);
+  } else {
     const lock = readLock(home);
     console.error(`hub did not stop within 5s (pid ${lock?.pid ?? "unknown"})`);
     process.exit(1);
@@ -97,8 +103,12 @@ if (cmd === "hub" && sub === "start") {
   const home = pluriplyHome();
   try {
     const stopped = await stopHub({ home });
-    if (stopped === "timeout") {
-      console.error("hub did not stop within 5s; not restarting");
+    if (stopped === "timeout" || stopped === "unresponsive") {
+      console.error(
+        stopped === "timeout"
+          ? "hub did not stop within 5s; not restarting"
+          : "hub is not answering; not restarting",
+      );
       process.exit(1);
     }
     const live = await spawnHub({ home });
@@ -282,6 +292,10 @@ if (cmd === "hub" && sub === "start") {
   // 붙잡지 않도록 unref).
   process.stdout.write(JSON.stringify(out) + "\n", () => process.exit(0));
   setTimeout(() => process.exit(0), 500).unref?.();
+} else if (cmd === "codex") {
+  // Plan 5b: 깨울 수 있는 Codex 세션. 나머지 인자는 해석하지 않고 codex 에 그대로 넘긴다.
+  const { runCodex } = await import("../src/launcher/codex.js");
+  process.exit(await runCodex(rest));
 } else if (cmd === "connector") {
   const agent = flag("agent");
   if (!agent) {
@@ -296,7 +310,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }
