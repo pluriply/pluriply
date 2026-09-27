@@ -4,50 +4,12 @@
 // 공개 미러에도 실리므로 허브·커넥터는 쓰는 순간에만 동적으로 불러온다(경계 테스트).
 import { pluriplyHome } from "../shared/paths.js";
 import { resolveAgentName } from "../shared/identity.js";
+import { formatActivity } from "../shared/activity-format.js";
 
 export const HOOK_AGENTS = ["claude-code", "codex", "antigravity"];
-const MAX_REASON = 2000;
-const MORE_LINE = (n) => `(+${n} more: run list_tasks)`;
 
-/**
- * 허브 hook.poll 응답을 모델이 읽을 문구로 만든다. 순수 함수.
- * @param {{tool: string, cwd: string, channelCode: string, incoming: object[], results: object[], more: number}} r
- * @returns {string}
- */
-export function formatStopReason(r) {
-  const head = `pluriply: new activity on channel ${r.channelCode} for ${r.tool} (cwd ${r.cwd}). Handle it before finishing.`;
-  const inLines = (r.incoming ?? []).map(
-    (t) => `- ${t.taskId} ${t.kind ?? "task"} from ${t.from}: "${t.summary}"`,
-  );
-  const resLines = (r.results ?? []).map(
-    (t) => `- ${t.taskId} ${t.status} by ${t.to}: "${t.summary}"`,
-  );
-  let more = r.more ?? 0;
-  const build = () => {
-    const parts = [head];
-    if (inLines.length)
-      parts.push(
-        "Incoming tasks (do the work, then submit_result — or submit_review for reviews; skip one another instance already claimed):",
-        ...inLines,
-      );
-    if (resLines.length)
-      parts.push(
-        "Results of tasks you delegated (read them with get_task_result):",
-        ...resLines,
-      );
-    if (more > 0) parts.push(MORE_LINE(more));
-    return parts.join("\n");
-  };
-  let text = build();
-  // 2,000자를 넘으면 뒤 항목부터 덜어내고 more 를 늘린다
-  while (text.length > MAX_REASON && inLines.length + resLines.length > 0) {
-    if (resLines.length) resLines.pop();
-    else inLines.pop();
-    more++;
-    text = build();
-  }
-  return text;
-}
+/** 허브 hook.poll 응답을 모델이 읽을 문구로 만든다(공유 함수의 옛 이름, 호환용). */
+export { formatActivity as formatStopReason };
 
 /** @param {string} input @returns {object} 손상·빈 입력은 {} */
 function parseInput(input) {
@@ -135,8 +97,14 @@ export async function runStopHook({
     work.catch(() => {}); // 위 race 가 이미 끝난 뒤의 거부가 미처리로 남지 않게
     const r = await Promise.race([work, deadline]);
     if (!r || !r.channelCode) return {};
-    if ((r.incoming?.length ?? 0) + (r.results?.length ?? 0) === 0) return {};
-    const reason = formatStopReason({ ...r, cwd: at });
+    if (
+      (r.incoming?.length ?? 0) +
+        (r.results?.length ?? 0) +
+        (r.stalled?.length ?? 0) ===
+      0
+    )
+      return {};
+    const reason = formatActivity({ ...r, cwd: at });
     // antigravity 는 {decision:"continue"} 라야 멈추지 않고 reason 을 주입한다(실기기 확인).
     // 다른 도구는 그대로 block.
     return agent === "antigravity"

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { makeWaitForActivity } from "./wait.js";
 
 /** @param {object} data @returns {object} MCP 텍스트 결과 */
 function ok(data) {
@@ -225,6 +226,15 @@ export function registerTools(server, hub, { agent, instanceId }) {
     }
   }
 
+  /** Claude Code 는 wait_for_activity 가 쉬는 세션을 깨우므로 위임 응답에서 안내한다(Plan 5a D5) */
+  const withNotify = (data) =>
+    agent === "claude-code"
+      ? {
+          ...data,
+          notify: "Call wait_for_activity to be woken when the result arrives.",
+        }
+      : data;
+
   /**
    * 채널이 없을 때 허브에 직전 채널 복귀를 요청한다.
    * @returns {Promise<string|null>} 복귀한 채널 코드
@@ -377,6 +387,28 @@ export function registerTools(server, hub, { agent, instanceId }) {
     },
   );
 
+  const waitForActivity = makeWaitForActivity({ hubRequest, agent });
+  const waitForActivityChannel = needChannel((args, code, extra) =>
+    waitForActivity(args, code, extra),
+  );
+  server.registerTool(
+    "wait_for_activity",
+    {
+      annotations: annotations({ readOnlyHint: true }),
+      description:
+        "Wait until something arrives for this session — tasks sent to you, results of tasks you sent, or notices that nobody picked up your task — and return a summary. " +
+        (agent === "claude-code"
+          ? "In Claude Code this call moves to the background after about 2 minutes and wakes this session when activity arrives: call it after delegating work or when the user asks you to listen, and call it again after handling what it returns. wait_seconds defaults to 43200 (max 86400)."
+          : "In this tool the call blocks the session, so keep it short: wait_seconds defaults to 50 (max 300). Stop hooks also report new activity at the end of each turn."),
+      inputSchema: { wait_seconds: z.number().optional() },
+    },
+    // worker 는 채널이 없어도 즉시 거절한다(needChannel 앞에서 검사 — 자동 복귀 왕복 없이).
+    (args, extra) =>
+      worker
+        ? fail("wait_for_activity is for interactive sessions")
+        : waitForActivityChannel(args, extra),
+  );
+
   server.registerTool(
     "list_peers",
     {
@@ -462,20 +494,22 @@ export function registerTools(server, hub, { agent, instanceId }) {
       },
     },
     needChannel(
-      (
+      async (
         { to, request, attachments = [], mode = "auto", cwd = process.cwd() },
         code,
       ) =>
-        hubRequest("task.create", {
-          channelCode: code,
-          to,
-          request,
-          attachments,
-          mode,
-          cwd,
-          origin: process.cwd(),
-          depth: delegationDepth(),
-        }),
+        withNotify(
+          await hubRequest("task.create", {
+            channelCode: code,
+            to,
+            request,
+            attachments,
+            mode,
+            cwd,
+            origin: process.cwd(),
+            depth: delegationDepth(),
+          }),
+        ),
     ),
   );
 
@@ -651,7 +685,7 @@ export function registerTools(server, hub, { agent, instanceId }) {
           origin: process.cwd(),
           depth: delegationDepth(),
         });
-        if (wait_seconds === undefined) return created;
+        if (wait_seconds === undefined) return withNotify(created);
         const { taskId } = created;
         if (created.dispatch === "none") {
           await hubRequest("task.cancel", {
@@ -735,6 +769,8 @@ export function registerTools(server, hub, { agent, instanceId }) {
           from: sent_by_me ? state.instanceId : undefined,
           status,
           kind,
+          // 모델이 목록을 보았으니 제 몫의 태스크는 전달된 것으로 기록한다(Plan 5a)
+          markDelivered: true,
         }),
     ),
   );

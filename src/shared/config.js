@@ -16,12 +16,14 @@ export const DEFAULT_LIMITS = Object.freeze({
   timeoutMs: 20 * 60 * 1000,
   maxConcurrentPerAgent: 1,
   maxQueuedPerAgent: 10,
+  // 대화형 세션 몫으로 판정된 태스크를 아무도 받아 보지 않으면 워커로 넘기기까지의 초(Plan 5a). 0 이면 끔.
+  interactivePickupSeconds: 120,
 });
 
 /**
  * `<home>/config.json`. 없거나 손상되면 기본값.
  * @param {string} home
- * @returns {{workers: object, limits: {maxDepth: number, timeoutMs: number, maxConcurrentPerAgent: number, maxQueuedPerAgent: number}, allowedRoots: string[]}}
+ * @returns {{workers: object, limits: {maxDepth: number, timeoutMs: number, maxConcurrentPerAgent: number, maxQueuedPerAgent: number, interactivePickupSeconds: number}, allowedRoots: string[]}}
  */
 export function loadConfig(home) {
   const file = join(home, "config.json");
@@ -43,7 +45,11 @@ export function loadConfig(home) {
   const limits = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     const v = doc.limits?.[key];
-    if (Number.isInteger(v) && v > 0) limits[key] = v;
+    if (key === "interactivePickupSeconds") {
+      // 0(끔)과 소수(테스트용 짧은 기한)를 받는다
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0)
+        limits[key] = v;
+    } else if (Number.isInteger(v) && v > 0) limits[key] = v;
   }
   const allowedRoots = Array.isArray(doc.allowedRoots)
     ? doc.allowedRoots.filter((r) => typeof r === "string" && isAbsolute(r))

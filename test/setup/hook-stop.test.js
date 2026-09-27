@@ -280,6 +280,35 @@ test("runStopHook closes a client that connects after the 2s deadline instead of
   assert.equal(requested, false);
 });
 
+test("runStopHook blocks for a stalled notice even when there are no incoming tasks or results", async () => {
+  const connect = async () => ({
+    request: async () => ({
+      channelCode: "plp-ab12-cd34",
+      tool: "claude-code",
+      incoming: [],
+      results: [],
+      stalled: [
+        {
+          taskId: "task_9",
+          to: "codex",
+          summary: "Port the parser",
+          hint: "no live session picked it up within 120s; worker disabled",
+        },
+      ],
+      more: 0,
+    }),
+    close() {},
+  });
+  const out = await runStopHook({
+    agent: "claude-code",
+    input: JSON.stringify({ cwd: "/repo" }),
+    env: {},
+    connect,
+  });
+  assert.equal(out.decision, "block");
+  assert.match(out.reason, /Waiting on others/);
+});
+
 test("runStopHook maps workspacePaths[0] for antigravity and answers decision continue", async () => {
   const fake = (reply) => async () => ({
     request: async (type, payload) => {

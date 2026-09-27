@@ -107,6 +107,26 @@ test("setWorkerEnabled merges into workers only, preserves other keys, and start
   );
 });
 
+test("loadConfig accepts interactivePickupSeconds of 0 or a fraction and falls back to 120 otherwise", () => {
+  const read = (limits) => {
+    const home = mkdtempSync(join(tmpdir(), "plp-"));
+    saveConfig(home, { limits });
+    return loadConfig(home).limits.interactivePickupSeconds;
+  };
+  assert.equal(DEFAULT_LIMITS.interactivePickupSeconds, 120);
+  assert.equal(read({}), 120);
+  assert.equal(read({ interactivePickupSeconds: 0 }), 0);
+  assert.equal(read({ interactivePickupSeconds: 0.2 }), 0.2);
+  assert.equal(read({ interactivePickupSeconds: 300 }), 300);
+  assert.equal(read({ interactivePickupSeconds: -1 }), 120);
+  assert.equal(read({ interactivePickupSeconds: "30" }), 120);
+  assert.equal(read({ interactivePickupSeconds: Infinity }), 120);
+  // 다른 limits 는 여전히 양의 정수만 받는다
+  const home = mkdtempSync(join(tmpdir(), "plp-"));
+  saveConfig(home, { limits: { maxDepth: 0.5 } });
+  assert.equal(loadConfig(home).limits.maxDepth, DEFAULT_LIMITS.maxDepth);
+});
+
 test("setWorkerEnabled creates the home directory when it does not exist yet (fresh install, hub never started)", () => {
   const tmp = mkdtempSync(join(tmpdir(), "plp-"));
   const home = join(tmp, "nonexistent");
