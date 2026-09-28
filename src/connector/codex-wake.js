@@ -89,6 +89,7 @@ export function startCodexWake({
     } catch {
       // 직전 채널 복귀 실패: 루프는 그대로 돈다(모델이 join_channel 하면 그 채널을 본다)
     }
+    let hubLost = false;
     while (!stopped) {
       let r;
       try {
@@ -101,12 +102,22 @@ export function startCodexWake({
           },
           { timeoutMs: chunkMs + 5000 },
         );
-      } catch {
+      } catch (err) {
         if (stopped) return;
+        // 재접속 중 등으로 계속 실패하는 동안은 한 줄만 남긴다(매 재시도마다 찍으면 로그가 넘친다) —
+        // 이 streak 의 첫 실패에만 알린다.
+        if (!hubLost) {
+          hubLost = true;
+          log(`pluriply: auto-wake lost the hub (${err.message}); retrying\n`);
+        }
         await sleep(5000); // 허브 재접속 중 등: 쉬었다 다시
         continue;
       }
       if (stopped) return;
+      if (hubLost) {
+        hubLost = false;
+        log("pluriply: auto-wake reconnected\n");
+      }
       const fromHub = validThreadId(r?.threadId);
       if (fromHub && !state.threadId) state.threadId = fromHub;
       const found =

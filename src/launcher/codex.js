@@ -23,20 +23,33 @@ const PREFIX = "plp-cx-";
 export const SOCKET_WAIT_MS = 10_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// TOML 표 머리는 대괄호·점 둘레 공백과 따옴표 키("…", '…')를 허용한다.
+const REGISTERED_HEADER =
+  /^\s*\[\s*mcp_servers\s*\.\s*(?:pluriply|"pluriply"|'pluriply')\s*\]\s*(?:#.*)?$/m;
+
 /**
  * Codex 설정에 pluriply MCP 서버가 등록돼 있는지(`pluriply setup` 이 넣는다). 등록돼 있지 않으면
- * 깨울 커넥터가 없고, env_vars 덮어쓰기는 앱 서버를 "invalid transport" 로 멈추게 한다.
- * @param {NodeJS.ProcessEnv} env @param {string} home @returns {boolean}
+ * 깨울 커넥터가 없다. config.toml 을 못 읽는 이유가 파일이 없어서(ENOENT)면 그냥 미등록으로
+ * 본다 — 아직 `pluriply setup` 을 안 돌린 흔한 경우다. 그 밖의 이유(EACCES, 그 자리에 디렉터리가
+ * 있어 EISDIR 등)는 등록 여부 자체를 알 수 없으니 `error` 로 알려 호출자가 미등록과 다른 안내를
+ * 내게 한다.
+ * @param {NodeJS.ProcessEnv} env @param {string} home
+ * @returns {{registered: boolean, error?: {path: string, code: string}}}
  */
 export function pluriplyRegistered(env, home) {
   const dir = env.CODEX_HOME || join(home, ".codex");
+  const path = join(dir, "config.toml");
+  let text;
   try {
-    return /^\s*\[mcp_servers\.(?:pluriply|"pluriply")\]\s*$/m.test(
-      readFileSync(join(dir, "config.toml"), "utf8"),
-    );
-  } catch {
-    return false;
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return { registered: false };
+    return {
+      registered: false,
+      error: { path, code: err.code ?? String(err) },
+    };
   }
+  return { registered: REGISTERED_HEADER.test(text) };
 }
 
 /** 사용자가 작업 폴더(-C/--cd)를 줬는지 @param {string[]} args @returns {boolean} */
@@ -223,7 +236,14 @@ export async function runCodex(args, o = {}) {
     return runPlainTui(args);
   }
 
-  if (!pluriplyRegistered(env, userHome)) {
+  const reg = pluriplyRegistered(env, userHome);
+  if (reg.error) {
+    log(
+      `pluriply: could not read ${reg.error.path} (${reg.error.code}); starting plain codex\n`,
+    );
+    return runPlainTui(args);
+  }
+  if (!reg.registered) {
     log(
       "pluriply: pluriply is not registered in Codex (run `pluriply setup`); starting plain codex without wake\n",
     );
@@ -277,21 +297,27 @@ export async function runCodex(args, o = {}) {
 
   // detached: 별도 프로세스 그룹 — TUI 에서 누른 Ctrl-C 가 앱 서버에 닿지 않게. cwd 는 지정하지
   // 않는다(실행기 자신의 실제 cwd 를 그대로 물려받는다 — 운영에서는 어차피 같은 값).
-  // Codex 는 MCP 서버에 환경 변수를 걸러 넘기므로 이 이름을 명시해야 커넥터가 받는다.
+  // 소켓 주소는 앱 서버 env 가 아니라 `-c` 로 pluriply MCP 서버에만 준다 — env 로 주면 셸·자식
+  // `codex exec` 까지 물려받아 제 스레드를 부모 소켓으로 깨우려다 실패한다(codex-cli 0.155.1
+  // 실측: `env.KEY` 는 사용자 설정의 [mcp_servers.pluriply] 에 합쳐지고 부모 env 는 걸러진다).
+  // JSON 문자열은 mkdtemp 소켓 경로에 한해 TOML basic string 으로도 유효하다(DEL·짝 없는
+  // 서로게이트는 아니지만 여기서는 나올 수 없다). 바깥 `pluriply codex` 에서 물려받은 값은 지운다.
+  const appEnv = { ...env };
+  delete appEnv.PLURIPLY_CODEX_REMOTE;
   app = spawn(
     bin,
     [
       ...binArgs,
       "app-server",
       "-c",
-      'mcp_servers.pluriply.env_vars=["PLURIPLY_CODEX_REMOTE"]',
+      `mcp_servers.pluriply.env.PLURIPLY_CODEX_REMOTE=${JSON.stringify(`unix://${sock}`)}`,
       "--listen",
       `unix://${sock}`,
     ],
     {
       detached: true,
       stdio: ["ignore", fd, fd],
-      env: { ...env, PLURIPLY_CODEX_REMOTE: `unix://${sock}` },
+      env: appEnv,
     },
   );
   closeSync(fd);

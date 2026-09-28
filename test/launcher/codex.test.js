@@ -91,12 +91,14 @@ test(
     assert.deepEqual(app.args, [
       "app-server",
       "-c",
-      'mcp_servers.pluriply.env_vars=["PLURIPLY_CODEX_REMOTE"]',
+      `mcp_servers.pluriply.env.PLURIPLY_CODEX_REMOTE=${JSON.stringify(remote)}`,
       "--listen",
       remote,
     ]);
     assert.match(remote, /^unix:\/\/.*\/plp-cx-[^/]+\/app\.sock$/);
-    assert.equal(app.remote, remote); // 커넥터·훅이 물려받는다
+    // 앱 서버 프로세스 자신의 env 에는 넣지 않는다 — `-c ...env.KEY=` 로만 MCP 서버 항목에
+    // 병합돼 들어가고, 앱 서버 밑의 다른 자식(모델이 띄우는 codex exec 등)에는 새지 않는다.
+    assert.equal(app.remote, null);
     assert.equal(tui.role, "tui");
     assert.deepEqual(tui.args, [
       "--remote",
@@ -112,6 +114,20 @@ test(
     while (pidAlive(app.pid) && Date.now() < deadline)
       await new Promise((r) => setTimeout(r, 50));
     assert.equal(pidAlive(app.pid), false);
+  },
+);
+
+test(
+  "strips a PLURIPLY_CODEX_REMOTE the launcher itself inherited before starting the app server",
+  { skip: skipWin },
+  async () => {
+    const s = setup({
+      FAKE_CODEX_EXIT: "0",
+      PLURIPLY_CODEX_REMOTE: "unix:///old/session/app.sock",
+    });
+    await s.run(["x"]);
+    const app = s.calls().find((c) => c.role === "app");
+    assert.equal(app.remote, null); // 이전 세션의 소켓 주소가 새 앱 서버로 새지 않는다
   },
 );
 
@@ -161,6 +177,29 @@ test(
     assert.equal(
       s.logs.join(""),
       "pluriply: pluriply is not registered in Codex (run `pluriply setup`); starting plain codex without wake\n",
+    );
+    assert.deepEqual(s.leftovers(), []);
+  },
+);
+
+test(
+  "when Codex's config.toml can't be read for a reason other than missing, it starts plain codex with a distinct notice",
+  { skip: skipWin },
+  async () => {
+    const s = setup({ FAKE_CODEX_EXIT: "0" });
+    const brokenUserHome = mkdtempSync(join(tmpdir(), "plp-lu-broken-"));
+    mkdirSync(join(brokenUserHome, ".codex", "config.toml"), {
+      recursive: true,
+    }); // config.toml 자리에 디렉터리 — EISDIR
+    const code = await s.run(["x"], { userHome: brokenUserHome });
+    assert.equal(code, 0);
+    assert.deepEqual(
+      s.calls().map((c) => [c.role, c.args]),
+      [["tui", ["x"]]],
+    );
+    assert.match(
+      s.logs.join(""),
+      /^pluriply: could not read .*config\.toml \(EISDIR\); starting plain codex\n$/,
     );
     assert.deepEqual(s.leftovers(), []);
   },
@@ -238,36 +277,81 @@ test(
   },
 );
 
-test("pluriplyRegistered detects [mcp_servers.pluriply] with or without quotes", () => {
+test("pluriplyRegistered detects [mcp_servers.pluriply] with or without quotes, and a trailing comment", () => {
   const dir = mkdtempSync(join(tmpdir(), "plp-lr-"));
   writeFileSync(
     join(dir, "config.toml"),
     '[mcp_servers.pluriply]\ncommand = "node"\n',
   );
-  assert.equal(pluriplyRegistered({}, dir), false); // home 은 .codex 하위를 본다
-  assert.equal(pluriplyRegistered({ CODEX_HOME: dir }, "/unused"), true);
+  assert.deepEqual(pluriplyRegistered({}, dir), { registered: false }); // home 은 .codex 하위를 본다
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: dir }, "/unused"), {
+    registered: true,
+  });
 
   const quoted = mkdtempSync(join(tmpdir(), "plp-lr-"));
   writeFileSync(
     join(quoted, "config.toml"),
     '[mcp_servers."pluriply"]\ncommand = "node"\n',
   );
-  assert.equal(pluriplyRegistered({ CODEX_HOME: quoted }, "/unused"), true);
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: quoted }, "/unused"), {
+    registered: true,
+  });
+
+  const commented = mkdtempSync(join(tmpdir(), "plp-lr-"));
+  writeFileSync(
+    join(commented, "config.toml"),
+    '[mcp_servers.pluriply]  # managed by pluriply setup\ncommand = "node"\n',
+  );
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: commented }, "/unused"), {
+    registered: true,
+  });
+
+  // TOML 은 표 머리의 대괄호·점 둘레 공백과 리터럴 문자열 키를 허용한다
+  for (const header of [
+    "[ mcp_servers.pluriply ]",
+    "[mcp_servers.'pluriply']",
+    '[ mcp_servers . "pluriply" ]',
+  ]) {
+    const spaced = mkdtempSync(join(tmpdir(), "plp-lr-"));
+    writeFileSync(join(spaced, "config.toml"), `${header}\ncommand = "node"\n`);
+    assert.deepEqual(
+      pluriplyRegistered({ CODEX_HOME: spaced }, "/unused"),
+      { registered: true },
+      header,
+    );
+  }
 
   const envOnly = mkdtempSync(join(tmpdir(), "plp-lr-"));
   writeFileSync(
     join(envOnly, "config.toml"),
     '[mcp_servers.pluriply.env]\nFOO = "bar"\n',
   );
-  assert.equal(pluriplyRegistered({ CODEX_HOME: envOnly }, "/unused"), false);
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: envOnly }, "/unused"), {
+    registered: false,
+  });
 
   const otherName = mkdtempSync(join(tmpdir(), "plp-lr-"));
   writeFileSync(
     join(otherName, "config.toml"),
     '[mcp_servers.other]\ncommand = "node"\n',
   );
-  assert.equal(pluriplyRegistered({ CODEX_HOME: otherName }, "/unused"), false);
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: otherName }, "/unused"), {
+    registered: false,
+  });
 
   const noFile = mkdtempSync(join(tmpdir(), "plp-lr-"));
-  assert.equal(pluriplyRegistered({ CODEX_HOME: noFile }, "/unused"), false);
+  assert.deepEqual(pluriplyRegistered({ CODEX_HOME: noFile }, "/unused"), {
+    registered: false,
+  });
+});
+
+test("pluriplyRegistered reports a read error distinct from not-registered when config.toml can't be read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "plp-lr-err-"));
+  // config.toml 자리에 디렉터리를 둬 EISDIR 을 유도한다 — chmod 000 은 root 로 실행되는 CI 에서는
+  // 무시되므로 대신 이 방법으로 "ENOENT 가 아닌" 읽기 실패를 만든다.
+  mkdirSync(join(dir, "config.toml"));
+  const result = pluriplyRegistered({ CODEX_HOME: dir }, "/unused");
+  assert.equal(result.registered, false);
+  assert.equal(result.error.code, "EISDIR");
+  assert.equal(result.error.path, join(dir, "config.toml"));
 });

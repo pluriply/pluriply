@@ -68,7 +68,7 @@ export function makeWaitForActivity({
   hubRequest,
   agent,
   sleep = defaultSleep,
-  now = Date.now,
+  now = () => performance.now(),
 }) {
   let listening = false;
   // 진행 중인 agent.wait 요청. 중단돼도 버리지 않고 남겨 둔다: 허브는 응답을 쓰는 순간

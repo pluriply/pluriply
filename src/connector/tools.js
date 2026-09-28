@@ -318,12 +318,12 @@ export function registerTools(
   async function waitForTask({ code, taskId, waitS, extra, label }) {
     const signal = extra?.signal;
     const progressToken = extra?._meta?.progressToken;
-    const deadline = Date.now() + waitS * 1000;
+    const deadline = performance.now() + waitS * 1000;
     let task = null;
     let lastProgress = -1;
     try {
       while (!signal?.aborted) {
-        const remaining = deadline - Date.now();
+        const remaining = deadline - performance.now();
         if (remaining <= 0) break;
         const timeoutMs = Math.min(ASK_CHUNK_MS, remaining);
         ({ task } = await hubRequest(
@@ -336,7 +336,7 @@ export function registerTools(
         if (progressToken !== undefined && extra?.sendNotification) {
           const elapsed = Math.min(
             waitS,
-            Math.round((waitS * 1000 - (deadline - Date.now())) / 1000),
+            Math.round((waitS * 1000 - (deadline - performance.now())) / 1000),
           );
           if (elapsed > lastProgress) {
             lastProgress = elapsed;
