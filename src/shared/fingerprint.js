@@ -1,0 +1,55 @@
+// Plan 6a(스펙 §4): 부품별 코드 지문. 프로세스가 기동 때 남긴 지문과 디스크의 지문을 비교해
+// 옛 코드로 도는 허브·커넥터를 가린다. npm 설치본(허브가 번들 한 파일)과 개발 체크아웃 모두
+// "그 폴더 아래 전부"라는 같은 규칙으로 계산한다 — 비교는 늘 같은 설치본 안에서 일어난다.
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PARTS = {
+  hub: ["src/hub", "src/shared"],
+  connector: ["src/connector", "src/shared"],
+};
+
+/** 이 모듈 기준 설치 루트(`src/shared` 의 두 단계 위) @returns {string} */
+export function installRoot() {
+  return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+}
+
+/** @param {string} dir @returns {string[]} 절대 경로(재귀), 점 파일·에디터 임시 파일(~로 끝남)은 건너뜀 */
+function listFiles(dir) {
+  return readdirSync(dir).flatMap((n) => {
+    if (n.startsWith(".") || n.endsWith("~")) return [];
+    const p = join(dir, n);
+    return statSync(p).isDirectory() ? listFiles(p) : [p];
+  });
+}
+
+/**
+ * 부품의 코드 지문. 읽기 실패(루트·폴더 없음, 권한, 읽는 중 교체)는 던지지 않고 null.
+ * @param {string} root 설치 루트 @param {"hub"|"connector"} part
+ * @returns {{version: string|null, fingerprint: string}|null}
+ */
+export function codeFingerprint(root, part) {
+  const dirs = PARTS[part];
+  if (!dirs || typeof root !== "string") return null;
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+    const version = typeof pkg.version === "string" ? pkg.version : null;
+    const h = createHash("sha256");
+    h.update(`version\0${version}\0`);
+    for (const d of dirs) {
+      const files = listFiles(join(root, d))
+        .map((p) => relative(root, p).split(sep).join("/"))
+        .sort();
+      for (const f of files) {
+        h.update(`${f}\0`);
+        h.update(readFileSync(join(root, f)));
+        h.update("\0");
+      }
+    }
+    return { version, fingerprint: h.digest("hex").slice(0, 12) };
+  } catch {
+    return null;
+  }
+}

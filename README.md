@@ -52,11 +52,13 @@ Every connected tool gets the same MCP tools. A typical flow:
 The hub starts automatically when the first connector needs it. Useful commands:
 
 ```sh
-npx pluriply status                 # is the hub running?
+npx pluriply status                 # hub + connected sessions; flags ones running older code
 npx pluriply hub restart            # restart it (e.g. after an upgrade)
 npx pluriply worker enable codex    # allow headless Codex workers
 npx pluriply worker list
 ```
+
+After upgrading pluriply, run `pluriply status`: it compares the code each running process started with against what is installed now. `✗` marks the hub or a session that still runs older code, with how to restart it (for example `/exit, then  claude --resume <id>` for Claude Code). Sessions using older pluriply code also get a one-line note at the end of their pluriply tool results. `pluriply status --json` prints the same as JSON.
 
 ## Wake Codex sessions
 

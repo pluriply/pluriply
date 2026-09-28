@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -16,6 +17,7 @@ import { pingHub, pidAlive } from "../src/shared/probe.js";
 import { connectIfLive } from "../src/connector/hub-client.js";
 import { isValidAgentName } from "../src/shared/identity.js";
 import { registerMcpServer } from "../src/shared/mcp-register.js";
+import { buildStatus, formatStatus } from "../src/shared/status-format.js";
 
 const BIN_PATH = fileURLToPath(import.meta.url);
 
@@ -229,16 +231,50 @@ if (cmd === "hub" && sub === "start") {
     process.exit(1);
   }
 } else if (cmd === "status") {
+  const json = rest.includes("--json");
   const home = pluriplyHome();
   const lock = readLock(home);
+  const out = (text, obj) =>
+    console.log(json ? JSON.stringify(obj, null, 2) : text);
   if (!lock) {
-    console.log("not running");
+    out("not running", { hub: { running: false } });
   } else {
     const info = await pingHub(lock.port);
     if (info) {
-      console.log(
-        `running (port ${lock.port}, pid ${info.pid ?? lock.pid}, version ${info.version ?? "unknown"}, protocol ${info.protocol ?? 1})`,
-      );
+      // Plan 6a: 프로토콜 10 허브면 세션 목록을 받아 옛 코드로 도는 허브·세션을 가린다
+      let sessions = null;
+      let error = null;
+      if ((info.protocol ?? 1) >= 10) {
+        const client = await connectIfLive({ home });
+        if (!client) error = "could not connect to the hub";
+        else {
+          try {
+            sessions = await client.request(
+              "hub.sessions",
+              {},
+              { timeoutMs: 3000 },
+            );
+          } catch (err) {
+            error = err.message;
+          } finally {
+            client.close();
+          }
+        }
+      }
+      const st = buildStatus({
+        ping: {
+          port: lock.port,
+          pid: info.pid ?? lock.pid,
+          version: info.version,
+          protocol: info.protocol ?? 1,
+        },
+        sessions,
+        error,
+      });
+      if (json) console.log(JSON.stringify(st, null, 2));
+      else
+        for (const line of formatStatus(st, { home: homedir() }))
+          console.log(line);
     } else if (!pidAlive(lock.pid)) {
       // Windows 에서는 SIGTERM 이 정리 핸들러 없이 즉시 종료라 허브가 락을 못 지운다.
       // pid 가 죽었으면 stopHub 와 같은 판정으로 락을 지우고 not running 으로 본다.
@@ -248,9 +284,11 @@ if (cmd === "hub" && sub === "start") {
       if (current?.pid === lock.pid) {
         rmSync(join(home, "hub.json"), { force: true });
       }
-      console.log("not running");
+      out("not running", { hub: { running: false } });
     } else {
-      console.log(`stale lockfile (pid ${lock.pid} not responding)`);
+      out(`stale lockfile (pid ${lock.pid} not responding)`, {
+        hub: { running: false, stale: true, pid: lock.pid },
+      });
     }
   }
 } else if (cmd === "hook" && sub === "stop") {
@@ -310,7 +348,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status [--json]|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }

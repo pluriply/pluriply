@@ -6,6 +6,22 @@ import {
   startCodexWake,
   runCodexQueue,
 } from "./codex-wake.js";
+import { codeFingerprint, installRoot } from "../shared/fingerprint.js";
+import { PACKAGE_VERSION } from "../shared/version.js";
+import { makeVersionCheck } from "./version-check.js";
+
+const CODE_ROOT = installRoot();
+const START_CODE = codeFingerprint(CODE_ROOT, "connector");
+/**
+ * 이 커넥터 프로세스가 기동 때 읽은 코드(Plan 6a) — hello 로 허브에 알리고, 도구 응답 경고의 기준이다.
+ * startedAt 은 재접속해도 바뀌지 않는다.
+ */
+export const CONNECTOR_CODE = {
+  version: START_CODE?.version ?? PACKAGE_VERSION,
+  fingerprint: START_CODE?.fingerprint ?? null,
+  root: CODE_ROOT,
+  startedAt: new Date().toISOString(),
+};
 
 /** @param {object} data @returns {object} MCP 텍스트 결과 */
 function ok(data) {
@@ -104,9 +120,17 @@ export async function hello(
       instanceId: instanceId ?? undefined,
       // 커넥터를 띄운 도구 프로세스 — 같은 세션의 Stop 훅이 같은 값을 보내 허브가 짝을 찾는다
       hostPid: process.ppid,
+      // Plan 6a: 이 커넥터의 코드 — status 가 옛 코드로 도는 세션을 가린다
+      version: CONNECTOR_CODE.version,
+      fingerprint: CONNECTOR_CODE.fingerprint ?? undefined,
+      root: CONNECTOR_CODE.root,
+      startedAt: CONNECTOR_CODE.startedAt,
+      wake: codexWakeEnabled({ agent, env: process.env, stale: hub.stale }),
     },
     { duringReconnect },
   );
+  // 허브의 코드(Plan 6a) — 도구 응답 경고가 허브가 옛 코드인지 판정한다. 옛 허브는 없다.
+  hub.hubInfo = r.hub ?? null;
   return r.instanceId;
 }
 
@@ -114,28 +138,59 @@ export async function hello(
  * Pluriply MCP 도구를 등록한다.
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
  * @param {import('./hub-client.js').HubClient} hub
- * @param {{agent: string, instanceId: string|null, env?: NodeJS.ProcessEnv, queue?: typeof runCodexQueue, wakeChunkMs?: number}} identity instanceId 는 구버전 허브로 시작하면 null 이다. env·queue·wakeChunkMs 는 테스트가 주입한다(wakeChunkMs 는 startCodexWake 의 agent.wait 청크 길이 — 기본값은 undefined 로 두어 startCodexWake 자신의 기본값(WAKE_CHUNK_MS)을 쓴다).
+ * @param {{agent: string, instanceId: string|null, env?: NodeJS.ProcessEnv, queue?: typeof runCodexQueue, wakeChunkMs?: number, versionCheck?: () => string[]}} identity instanceId 는 구버전 허브로 시작하면 null 이다. env·queue·wakeChunkMs·versionCheck 는 테스트가 주입한다(wakeChunkMs 는 startCodexWake 의 agent.wait 청크 길이 — 기본값은 undefined 로 두어 startCodexWake 자신의 기본값(WAKE_CHUNK_MS)을 쓴다).
  * @returns {{stopWake(): void}}
  */
 export function registerTools(
   server,
   hub,
-  { agent, instanceId, env = process.env, queue = runCodexQueue, wakeChunkMs },
+  {
+    agent,
+    instanceId,
+    env = process.env,
+    queue = runCodexQueue,
+    wakeChunkMs,
+    versionCheck,
+  },
 ) {
   /** instanceId 는 재접속 hello 가 돌려준 값으로 갱신된다(구버전 허브로 시작해 null 이었던 경우). */
   const state = { currentChannel: null, instanceId, threadId: null };
   const worker = Boolean(process.env.PLURIPLY_WORKER_TASK);
   // Plan 5b: `pluriply codex` 세션이면 codex queue 로 스스로 깨운다
   const autoWake = codexWakeEnabled({ agent, env, stale: hub.stale });
+  // Plan 6a §7: 옛 코드 경고(워커는 수명이 짧아 경고하지 않는다)
+  const codeWarnings = worker
+    ? () => []
+    : (versionCheck ??
+      makeVersionCheck({
+        self: CONNECTOR_CODE,
+        hubInfo: () => hub.hubInfo ?? null,
+      }));
   /**
-   * 도구를 등록하되, 호출마다 Codex 가 _meta 에 싣는 스레드 ID 를 기록한다. 인자 스키마가 없는
-   * 도구는 핸들러가 (extra) 하나만 받으므로 마지막 인자를 extra 로 본다.
+   * 도구를 등록하되, 호출마다 Codex 가 _meta 에 싣는 스레드 ID 를 기록하고, 결과 끝에
+   * 옛 코드 경고를 덧붙인다(Plan 6a §7). 첫 항목(JSON)은 건드리지 않는다 — 결과를 파싱하는
+   * 쪽이 영향을 받지 않게 한다.
    */
   const register = (name, def, handler) =>
-    server.registerTool(name, def, (...a) => {
+    server.registerTool(name, def, async (...a) => {
       const tid = threadIdFromExtra(a[a.length - 1]);
       if (tid) state.threadId = tid;
-      return handler(...a);
+      const result = await handler(...a);
+      let lines = [];
+      try {
+        lines = codeWarnings();
+      } catch {
+        // 경고 확인은 결과에 영향이 없다
+      }
+      if (lines.length === 0 || !Array.isArray(result?.content)) return result;
+      return {
+        ...result,
+        content: [
+          ...result.content,
+          // 줄바꿈으로 시작한다 — Claude Code 는 content 항목을 이어 붙여 보여 JSON 끝에 붙어 버린다(실기기)
+          ...lines.map((text) => ({ type: "text", text: `\n${text}` })),
+        ],
+      };
     });
   /** 워커는 자기 태스크 깊이 + 1, 대화형 세션은 0 */
   const delegationDepth = () =>
