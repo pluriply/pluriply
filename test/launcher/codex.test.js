@@ -9,6 +9,7 @@ import {
   writeFileSync,
   chmodSync,
   existsSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -258,8 +259,37 @@ test(
 );
 
 test(
-  "a leftover dir whose launcher.pid can't be read (permission denied) is left alone and never fails the run",
+  "removes a leftover dir whose launcher.pid was never written, once it's older than the stale threshold",
   { skip: skipWin },
+  async () => {
+    const s = setup({ FAKE_CODEX_EXIT: "0" });
+    const stale = join(s.tmp, "plp-cx-stale");
+    mkdirSync(stale); // launcher.pid 없음 — mkdtemp 만 하고 죽은 실행기를 흉내낸다
+    const old = new Date(Date.now() - 1000);
+    utimesSync(stale, old, old);
+    await s.run([], { staleMissingMs: 100 });
+    assert.deepEqual(s.leftovers(), []);
+  },
+);
+
+test(
+  "a stale dir without launcher.pid is left alone while its app.pid process is alive",
+  { skip: skipWin },
+  async () => {
+    const s = setup({ FAKE_CODEX_EXIT: "0" });
+    const dir = join(s.tmp, "plp-cx-live");
+    mkdirSync(dir); // launcher.pid 만 외부에서 지워진 살아 있는 세션을 흉내낸다
+    writeFileSync(join(dir, "app.pid"), String(process.pid));
+    const old = new Date(Date.now() - 1000);
+    utimesSync(dir, old, old);
+    await s.run([], { staleMissingMs: 100 });
+    assert.deepEqual(s.leftovers(), ["plp-cx-live"]);
+  },
+);
+
+test(
+  "a leftover dir whose launcher.pid can't be read (permission denied) is left alone and never fails the run",
+  { skip: skipWin || (process.getuid?.() === 0 && "root ignores chmod 000") },
   async () => {
     const s = setup({ FAKE_CODEX_EXIT: "0" });
     const denied = join(s.tmp, "plp-cx-denied");

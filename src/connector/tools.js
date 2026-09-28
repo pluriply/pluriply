@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { makeWaitForActivity } from "./wait.js";
+import { makeWaitForActivity, waitLimits } from "./wait.js";
 import {
   threadIdFromExtra,
   codexWakeEnabled,
@@ -431,7 +431,7 @@ export function registerTools(
         "Wait until something arrives for this session — tasks sent to you, results of tasks you sent, or notices that nobody picked up your task — and return a summary. " +
         (agent === "claude-code"
           ? "In Claude Code this call moves to the background after about 2 minutes and wakes this session when activity arrives: call it after delegating work or when the user asks you to listen, and call it again after handling what it returns. wait_seconds defaults to 43200 (max 86400)."
-          : "In this tool the call blocks the session, so keep it short: wait_seconds defaults to 50 (max 300). Stop hooks also report new activity at the end of each turn."),
+          : `In this tool the call blocks the session, so keep it short: wait_seconds defaults to ${waitLimits(agent).def} (max ${waitLimits(agent).max}). Stop hooks also report new activity at the end of each turn.`),
       inputSchema: { wait_seconds: z.number().optional() },
     },
     // worker 는 채널이 없어도 즉시 거절한다(needChannel 앞에서 검사 — 자동 복귀 왕복 없이).

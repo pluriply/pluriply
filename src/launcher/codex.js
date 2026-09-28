@@ -12,6 +12,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { constants, homedir, tmpdir } from "node:os";
@@ -21,6 +22,9 @@ import { pidAlive } from "../shared/probe.js";
 
 const PREFIX = "plp-cx-";
 export const SOCKET_WAIT_MS = 10_000;
+// launcher.pid 가 아직 없는(mkdtemp 만 되고 쓰기 전) 디렉터리를 죽은 것으로 볼 때까지 기다리는
+// 시간. 너무 짧으면 방금 mkdtemp 만 하고 아직 쓰지 못한 다른 실행기를 죽은 것으로 오판한다.
+export const STALE_MISSING_MS = 60_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // TOML 표 머리는 대괄호·점 둘레 공백과 따옴표 키("…", '…')를 허용한다.
@@ -120,8 +124,24 @@ function readLauncherPid(file) {
   return { status: "ok", pid: Number.isInteger(n) && n > 1 ? n : null };
 }
 
-/** 실행기가 강제 종료돼 남은 디렉터리(와 고아 앱 서버)를 치운다. @param {string} tmp */
-function cleanLeftovers(tmp) {
+/**
+ * 이 디렉터리가 launcher.pid 없이 stale 임계값보다 오래 남아 있는지. 통계를 못 읽으면(그 사이
+ * 지워졌다 등) 판단할 수 없으니 stale 이 아닌 것으로 본다 — 건드리지 않는다.
+ * @param {string} dir @param {number} staleMissingMs @returns {boolean}
+ */
+function isStaleMissing(dir, staleMissingMs) {
+  try {
+    return Date.now() - statSync(dir).mtimeMs > staleMissingMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 실행기가 강제 종료돼 남은 디렉터리(와 고아 앱 서버)를 치운다.
+ * @param {string} tmp @param {number} staleMissingMs
+ */
+function cleanLeftovers(tmp, staleMissingMs = STALE_MISSING_MS) {
   let names = [];
   try {
     names = readdirSync(tmp).filter((n) => n.startsWith(PREFIX));
@@ -131,11 +151,21 @@ function cleanLeftovers(tmp) {
   for (const name of names) {
     const dir = join(tmp, name);
     const launcher = readLauncherPid(join(dir, "launcher.pid"));
-    // 막 mkdtemp 된 남의(다른 실행기의) 디렉터리나, 권한이 없어 launcher.pid 를 읽을 수 없는
-    // 디렉터리(공유 /tmp 에서 다른 사용자 소유)는 건드리지 않는다 — 건드리면 아직 살아 있는
-    // 다른 실행기를 죽이거나, 권한 오류로 rmSync 가 던져 이 실행기 자체가 시작을 못 하게 된다.
-    if (launcher.status !== "ok") continue;
-    if (launcher.pid && pidAlive(launcher.pid)) continue;
+    // 권한이 없어 launcher.pid 를 읽을 수 없는 디렉터리(공유 /tmp 에서 다른 사용자 소유)는
+    // 건드리지 않는다 — 건드리면 권한 오류로 rmSync 가 던져 이 실행기 자체가 시작을 못 하게 된다.
+    if (launcher.status === "denied") continue;
+    if (launcher.status === "missing") {
+      // 막 mkdtemp 된 남의(다른 실행기의) 디렉터리일 수 있다 — 디렉터리가 stale 임계값보다
+      // 최근이면 아직 launcher.pid 를 쓰는 중일 수 있으니 건드리지 않는다. 임계값보다 오래됐으면
+      // mkdtemp 와 launcher.pid 쓰기 사이에서 죽은 것으로 보고 같은 정리 경로를 탄다.
+      if (!isStaleMissing(dir, staleMissingMs)) continue;
+      // 그 사이에 죽었다면 앱 서버는 뜬 적이 없다 — app.pid 의 프로세스가 살아 있으면 launcher.pid 만
+      // 외부에서 지워진(tmp 정리 도구 등) 살아 있는 세션이니 건드리지 않는다.
+      const running = readPid(join(dir, "app.pid"));
+      if (running && pidAlive(running)) continue;
+    } else if (launcher.pid && pidAlive(launcher.pid)) {
+      continue;
+    }
     const sock = join(dir, "app.sock");
     const app = readPid(join(dir, "app.pid"));
     if (app && pidAlive(app) && isAppServer(app, sock)) {
@@ -188,7 +218,7 @@ async function stopApp(app) {
 /**
  * `pluriply codex [codex 인자…]` 본체. 종료 코드를 돌려준다.
  * @param {string[]} args
- * @param {{env?: NodeJS.ProcessEnv, platform?: string, cwd?: string, bin?: string, binArgs?: string[], tmp?: string, home?: string, userHome?: string, socketWaitMs?: number, log?: (line: string) => void}} [o]
+ * @param {{env?: NodeJS.ProcessEnv, platform?: string, cwd?: string, bin?: string, binArgs?: string[], tmp?: string, home?: string, userHome?: string, socketWaitMs?: number, staleMissingMs?: number, log?: (line: string) => void}} [o]
  *   `o.cwd` 는 `-C` 인자 문구(`tuiArgs`)를 만드는 데만 쓴다 — 스폰되는 자식들의 실제 OS cwd 에는
  *   쓰지 않는다(그 값은 언제나 이 실행기 프로세스 자신의 cwd 를 물려받는다. 운영에서는
  *   `o.cwd` 의 기본값도 `process.cwd()`라 어차피 같은 디렉터리다).
@@ -203,6 +233,7 @@ export async function runCodex(args, o = {}) {
   const home = o.home ?? pluriplyHome();
   const userHome = o.userHome ?? homedir();
   const socketWaitMs = o.socketWaitMs ?? SOCKET_WAIT_MS;
+  const staleMissingMs = o.staleMissingMs ?? STALE_MISSING_MS;
   const log = o.log ?? ((line) => process.stderr.write(line));
 
   /**
@@ -252,7 +283,7 @@ export async function runCodex(args, o = {}) {
 
   // 소켓 디렉터리가 심볼릭 링크 경로면 앱 서버가 거절한다(/tmp → /private/tmp) — 실경로를 쓴다
   const tmp = o.tmp ?? realpathSync(tmpdir());
-  cleanLeftovers(tmp);
+  cleanLeftovers(tmp, staleMissingMs);
   const dir = mkdtempSync(join(tmp, PREFIX));
   const sock = join(dir, "app.sock");
   writeFileSync(join(dir, "launcher.pid"), String(process.pid));

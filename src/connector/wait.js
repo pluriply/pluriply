@@ -8,9 +8,10 @@ const HANDLE =
 
 /** @param {string} agent @returns {{def: number, max: number}} 초 */
 export function waitLimits(agent) {
-  return agent === "claude-code"
-    ? { def: 43_200, max: 86_400 }
-    : { def: 50, max: 300 };
+  if (agent === "claude-code") return { def: 43_200, max: 86_400 };
+  // Antigravity 는 MCP 도구 호출 자체가 ~180초에서 끊긴다고 보고돼, 여유를 두고 170으로 낮춘다.
+  if (agent === "antigravity") return { def: 50, max: 170 };
+  return { def: 50, max: 300 };
 }
 
 /** @param {string} agent @param {unknown} v @returns {number} 초. 1 미만·숫자 아님은 기본값, 상한 초과는 상한 */
