@@ -342,6 +342,13 @@ export async function runCodex(args, o = {}) {
       "app-server",
       "-c",
       `mcp_servers.pluriply.env.PLURIPLY_CODEX_REMOTE=${JSON.stringify(`unix://${sock}`)}`,
+      // 기본이 아닌 홈도 같은 이유로 설정으로 넘긴다(걸러지면 커넥터가 ~/.pluriply 허브에 붙는다)
+      ...(env.PLURIPLY_HOME
+        ? [
+            "-c",
+            `mcp_servers.pluriply.env.PLURIPLY_HOME=${JSON.stringify(env.PLURIPLY_HOME)}`,
+          ]
+        : []),
       "--listen",
       `unix://${sock}`,
     ],

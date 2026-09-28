@@ -61,7 +61,7 @@ function setup(extraEnv = {}) {
       : [];
   const leftovers = () =>
     readdirSync(tmp).filter((n) => n.startsWith("plp-cx-"));
-  return { tmp, home, userHome, run, calls, logs, leftovers };
+  return { tmp, home, userHome, out, run, calls, logs, leftovers };
 }
 
 test("hasCdFlag and tuiArgs respect a working directory the user already chose", () => {
@@ -115,6 +115,36 @@ test(
     while (pidAlive(app.pid) && Date.now() < deadline)
       await new Promise((r) => setTimeout(r, 50));
     assert.equal(pidAlive(app.pid), false);
+  },
+);
+
+test(
+  "passes a non-default PLURIPLY_HOME to the pluriply connector through -c env",
+  { skip: skipWin },
+  async () => {
+    // Codex 는 MCP 서버에 부모 환경 변수를 걸러 넘긴다 — 홈을 설정으로 직접 주지 않으면 커넥터가
+    // 기본 홈(~/.pluriply)의 허브에 붙는다.
+    const s = setup({
+      FAKE_CODEX_EXIT: "0",
+      PLURIPLY_HOME: "/tmp/plp e2e/home",
+    });
+    await s.run(["x"]);
+    const app = s.calls().find((c) => c.role === "app");
+    assert.ok(
+      app.args.includes(
+        'mcp_servers.pluriply.env.PLURIPLY_HOME="/tmp/plp e2e/home"',
+      ),
+    );
+    const plain = setup({ FAKE_CODEX_EXIT: "0" });
+    const env = { ...process.env };
+    delete env.PLURIPLY_HOME;
+    await plain.run(["x"], { env: { ...env, FAKE_CODEX_OUT: plain.out } });
+    const app2 = plain.calls().find((c) => c.role === "app");
+    assert.ok(
+      !app2.args.some((a) =>
+        a.startsWith("mcp_servers.pluriply.env.PLURIPLY_HOME"),
+      ),
+    );
   },
 );
 
