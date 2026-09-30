@@ -68,6 +68,24 @@ export function hasCdFlag(args) {
 }
 
 /**
+ * pluriply MCP 서버(커넥터)의 환경을 codex 설정으로 넘기는 `-c mcp_servers.pluriply.env.KEY=…` 인자들.
+ * Codex 는 MCP 서버에 부모 환경 변수를 걸러 넘긴다(codex-cli 0.155.1 실측) — env 로 주면 커넥터에 닿지
+ * 않는다. 기본이 아닌 홈(PLURIPLY_HOME)과 codex 실행 파일(PLURIPLY_CODEX_BIN — 커넥터의 `codex queue` 가
+ * 같은 실행 파일을 쓰게)은 있을 때만, 깨우기를 못 켠 이유(PLURIPLY_CODEX_WAKE_ERROR, Plan 6c §3.4)는
+ * 주어졌을 때만 넣는다. JSON 문자열은 이 값들에 한해 TOML basic string 으로도 유효하다.
+ * @param {{env: NodeJS.ProcessEnv, wakeError?: string|null}} o @returns {string[]}
+ */
+export function connectorEnvArgs({ env, wakeError = null }) {
+  const out = [];
+  const put = (key, value) =>
+    out.push("-c", `mcp_servers.pluriply.env.${key}=${JSON.stringify(value)}`);
+  if (env.PLURIPLY_HOME) put("PLURIPLY_HOME", env.PLURIPLY_HOME);
+  if (env.PLURIPLY_CODEX_BIN) put("PLURIPLY_CODEX_BIN", env.PLURIPLY_CODEX_BIN);
+  if (wakeError) put("PLURIPLY_CODEX_WAKE_ERROR", wakeError);
+  return out;
+}
+
+/**
  * TUI 인자. -C 가 없으면 스레드의 작업 폴더가 앱 서버를 띄운 폴더가 되므로 현재 폴더를 준다.
  * @param {{sock: string, cwd: string, args: string[]}} o @returns {string[]}
  */
@@ -241,17 +259,24 @@ export async function runCodex(args, o = {}) {
    * 그룹이라 터미널의 신호(Ctrl-C, 터미널 닫힘)를 직접 받아 알아서 끝난다 — 실행기는 무시하고
    * TUI 가 끝나기를 기다린다. 지킬 것이 없는 경로라(앱 서버·임시 디렉터리 없음) 신호가 오면
    * 실행기가 곧장 죽어도 안전하다는 판단이 아니라, TUI 의 종료 코드를 그대로 돌려주기 위해서다.
+   *
+   * wakeError(깨우기를 못 켠 이유 한 줄)는 이 codex 의 pluriply 커넥터에 `-c` 로 넘긴다(Plan 6c §3.4) —
+   * 커넥터가 허브에 `off` + 이유로 보고해 `pluriply status` 가 보여 준다.
    */
-  const runPlainTui = async (tuiArgv) => {
+  const runPlainTui = async (tuiArgv, wakeError) => {
     const ignore = () => {};
     process.on("SIGINT", ignore);
     process.on("SIGTERM", ignore);
     process.on("SIGHUP", ignore);
     try {
-      const tui = spawn(bin, [...binArgs, ...tuiArgv], {
-        stdio: "inherit",
-        env,
-      });
+      const tui = spawn(
+        bin,
+        [...binArgs, ...connectorEnvArgs({ env, wakeError }), ...tuiArgv],
+        {
+          stdio: "inherit",
+          env,
+        },
+      );
       return await exitCodeOf(tui);
     } finally {
       process.off("SIGINT", ignore);
@@ -261,24 +286,21 @@ export async function runCodex(args, o = {}) {
   };
 
   if (platform === "win32") {
-    log(
-      "pluriply: Codex wake is not supported on Windows yet; starting plain codex\n",
-    );
-    return runPlainTui(args);
+    const why = "Codex wake is not supported on Windows yet";
+    log(`pluriply: ${why}; starting plain codex\n`);
+    return runPlainTui(args, why);
   }
 
   const reg = pluriplyRegistered(env, userHome);
   if (reg.error) {
-    log(
-      `pluriply: could not read ${reg.error.path} (${reg.error.code}); starting plain codex\n`,
-    );
-    return runPlainTui(args);
+    const why = `could not read ${reg.error.path} (${reg.error.code})`;
+    log(`pluriply: ${why}; starting plain codex\n`);
+    return runPlainTui(args, why);
   }
   if (!reg.registered) {
-    log(
-      "pluriply: pluriply is not registered in Codex (run `pluriply setup`); starting plain codex without wake\n",
-    );
-    return runPlainTui(args);
+    const why = "pluriply is not registered in Codex (run `pluriply setup`)";
+    log(`pluriply: ${why}; starting plain codex without wake\n`);
+    return runPlainTui(args, why);
   }
 
   // 소켓 디렉터리가 심볼릭 링크 경로면 앱 서버가 거절한다(/tmp → /private/tmp) — 실경로를 쓴다
@@ -342,13 +364,9 @@ export async function runCodex(args, o = {}) {
       "app-server",
       "-c",
       `mcp_servers.pluriply.env.PLURIPLY_CODEX_REMOTE=${JSON.stringify(`unix://${sock}`)}`,
-      // 기본이 아닌 홈도 같은 이유로 설정으로 넘긴다(걸러지면 커넥터가 ~/.pluriply 허브에 붙는다)
-      ...(env.PLURIPLY_HOME
-        ? [
-            "-c",
-            `mcp_servers.pluriply.env.PLURIPLY_HOME=${JSON.stringify(env.PLURIPLY_HOME)}`,
-          ]
-        : []),
+      // 기본이 아닌 홈·codex 실행 파일도 같은 이유로 설정으로 넘긴다(걸러지면 커넥터가 ~/.pluriply
+      // 허브에 붙고, `codex queue` 가 PATH 의 codex 를 찾는다)
+      ...connectorEnvArgs({ env }),
       "--listen",
       `unix://${sock}`,
     ],
@@ -378,9 +396,8 @@ export async function runCodex(args, o = {}) {
     await sleep(100);
   if (handledSignal) return await new Promise(() => {}); // onSignal 이 정리하고 곧 종료한다
   if (!existsSync(sock) || appExited) {
-    log(
-      `pluriply: could not start the Codex app server (see ${logPath}); starting plain codex without wake\n`,
-    );
+    const why = `could not start the Codex app server (see ${logPath})`;
+    log(`pluriply: ${why}; starting plain codex without wake\n`);
     await stopApp(app);
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -388,7 +405,7 @@ export async function runCodex(args, o = {}) {
       // 정리 실패를 무시한다
     }
     offSignals();
-    return runPlainTui(args);
+    return runPlainTui(args, why);
   }
 
   tuiStarted = true;

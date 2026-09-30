@@ -60,6 +60,8 @@ npx pluriply worker list
 
 After upgrading pluriply, run `pluriply status`: it compares the code each running process started with against what is installed now. `✗` marks the hub or a session that still runs older code, with how to restart it (for example `/exit, then  claude --resume <id>` for Claude Code). Sessions using older pluriply code also get a one-line note at the end of their pluriply tool results. `pluriply status --json` prints the same as JSON.
 
+`pluriply status` also shows what went wrong in the last 24 hours, if anything: tasks whose target session could not be woken (`wake-failed`, followed by `to-worker` when a worker took over), tasks nobody picked up in time (`unclaimed`), workers that failed to start (`worker-failed`), and Stop hooks the hub could not match to a session. A `!` marks a `pluriply codex` session whose auto-wake stopped, with how to fix it (reopen it with `pluriply codex`); `·` marks a Codex session that was started without it. The sender's model sees the same failures in the task's `events` (`get_task_result`, `list_tasks`). A hub that was started automatically logs to `~/.pluriply/logs/hub.log`.
+
 ## Wake Codex sessions
 
 Start Codex with `pluriply codex` (any codex arguments work, e.g. `pluriply codex resume --last`).

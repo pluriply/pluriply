@@ -241,10 +241,11 @@ if (cmd === "hub" && sub === "start") {
   } else {
     const info = await pingHub(lock.port);
     if (info) {
-      // Plan 6a: 프로토콜 10 허브면 세션 목록을 받아 옛 코드로 도는 허브·세션을 가린다
+      // Plan 6a: 세션 목록을 받아 옛 코드로 도는 허브·세션을 가린다. Plan 6c: 프로토콜 11 부터
+      // (깨우기 상태·problems 가 함께 온다) — 더 옛 허브는 재시작 안내만 낸다.
       let sessions = null;
       let error = null;
-      if ((info.protocol ?? 1) >= 10) {
+      if ((info.protocol ?? 1) >= 11) {
         const client = await connectIfLive({ home });
         if (!client) error = "could not connect to the hub";
         else {
@@ -270,6 +271,9 @@ if (cmd === "hub" && sub === "start") {
         },
         sessions,
         error,
+        // Plan 6c D4: 자동 기동 허브의 로그(problems 절이 가리킨다)
+        // src/hub/lifecycle.js 의 hubLogPath 와 같은 경로 — bin 은 허브를 공개 경계(index.js)로만 가져온다
+        logFile: join(home, "logs", "hub.log"),
       });
       if (json) console.log(JSON.stringify(st, null, 2));
       else

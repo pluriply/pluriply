@@ -18,5 +18,6 @@ export const PACKAGE_VERSION = pkg.version;
  * 8: Plan 5a (agent.wait 보류 요청, 태스크 dispatch·fallback 기록, 활동 응답의 stalled).
  * 9: Plan 5b (hook.poll의 sessionId로 연결의 threadId 보관, agent.wait의 threadId·requireThread).
  * 10: Plan 6a (agent.hello의 코드 정보·응답의 hub, hub.sessions).
+ * 11: Plan 6c (session.report, hello 응답 hub.protocol, hub.sessions의 wakeState·problems, 태스크 events).
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;

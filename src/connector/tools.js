@@ -138,7 +138,7 @@ export async function hello(
  * Pluriply MCP 도구를 등록한다.
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
  * @param {import('./hub-client.js').HubClient} hub
- * @param {{agent: string, instanceId: string|null, env?: NodeJS.ProcessEnv, queue?: typeof runCodexQueue, wakeChunkMs?: number, versionCheck?: () => string[]}} identity instanceId 는 구버전 허브로 시작하면 null 이다. env·queue·wakeChunkMs·versionCheck 는 테스트가 주입한다(wakeChunkMs 는 startCodexWake 의 agent.wait 청크 길이 — 기본값은 undefined 로 두어 startCodexWake 자신의 기본값(WAKE_CHUNK_MS)을 쓴다).
+ * @param {{agent: string, instanceId: string|null, env?: NodeJS.ProcessEnv, queue?: typeof runCodexQueue, wakeChunkMs?: number, versionCheck?: () => string[], log?: (line: string) => void}} identity instanceId 는 구버전 허브로 시작하면 null 이다. env·queue·wakeChunkMs·versionCheck 는 테스트가 주입한다(wakeChunkMs 는 startCodexWake 의 agent.wait 청크 길이 — 기본값은 undefined 로 두어 startCodexWake 자신의 기본값(WAKE_CHUNK_MS)을 쓴다).
  * @returns {{stopWake(): void}}
  */
 export function registerTools(
@@ -151,6 +151,7 @@ export function registerTools(
     queue = runCodexQueue,
     wakeChunkMs,
     versionCheck,
+    log = (line) => process.stderr.write(line),
   },
 ) {
   /** instanceId 는 재접속 hello 가 돌려준 값으로 갱신된다(구버전 허브로 시작해 null 이었던 경우). */
@@ -158,6 +159,30 @@ export function registerTools(
   const worker = Boolean(process.env.PLURIPLY_WORKER_TASK);
   // Plan 5b: `pluriply codex` 세션이면 codex queue 로 스스로 깨운다
   const autoWake = codexWakeEnabled({ agent, env, stale: hub.stale });
+  /**
+   * Plan 6c §3.2: 깨우기 상태 보고는 codex 대화형 커넥터만 한다. 허브가 session.report 를 모르면
+   * (프로토콜 < 11 — hello 응답의 hub.protocol 로 가린다) 보내지 않는다.
+   */
+  const reportsWake = agent === "codex" && !worker;
+  const hubKnowsReports = () => (hub.hubInfo?.protocol ?? 1) >= 11;
+  /** @type {{wakeState: string, reason?: string}|null} 마지막 보고 — 허브가 재시작되면 다시 알린다 */
+  let lastReport = null;
+  /**
+   * 허브에 이 세션의 깨우기 상태를 알린다. 실패는 커넥터 동작을 바꾸지 않는다(stderr 한 줄).
+   * @param {{wakeState: "on"|"off"|"failed", reason?: string, returned?: string[]}} payload
+   */
+  async function reportWakeState(payload) {
+    if (!reportsWake || !hubKnowsReports()) return;
+    lastReport = { wakeState: payload.wakeState };
+    if (payload.reason) lastReport.reason = payload.reason;
+    try {
+      await hubRequest("session.report", payload);
+    } catch (err) {
+      log(
+        `pluriply: could not report the wake state to the hub (${err.message})\n`,
+      );
+    }
+  }
   // Plan 6a §7: 옛 코드 경고(워커는 수명이 짧아 경고하지 않는다)
   const codeWarnings = worker
     ? () => []
@@ -441,6 +466,17 @@ export function registerTools(
         needsRecover = true;
         return;
       }
+      // Plan 6c: 재시작한 허브는 이 세션의 깨우기 상태를 모른다(연결 단위 메모리) — 마지막 보고를 다시
+      // 알린다. 되돌릴 태스크는 싣지 않는다(그 사이 같은 폴더 키로 다시 전달된 태스크를 되돌리면 안 된다).
+      // hubRequest 가 아니라 hub.request(duringReconnect) — 이 리스너가 재접속 배리어다(위 주석).
+      if (lastReport && hubKnowsReports())
+        hub
+          .request("session.report", lastReport, { duringReconnect: true })
+          .catch((err) =>
+            log(
+              `pluriply: could not report the wake state to the hub (${err.message})\n`,
+            ),
+          );
       // 재참여 실패도 needsRecover 로 남기고, 채널이 사라졌으면 currentChannel 을 비운다
       if (await restoreChannel({ duringReconnect: true }))
         hub.emit("rejoined", state.currentChannel);
@@ -555,7 +591,8 @@ export function registerTools(
         "spawned/queued = the hub started a headless worker, none = nothing will process it (the hint says how to enable a worker). " +
         "pinned = the task is fixed to that instance (no worker will be spawned); targetOnline tells whether it is connected right now. " +
         "Always pass cwd as the folder the work should happen in. " +
-        "If targetJoined is false the target has not joined yet. Agent names are case-sensitive.",
+        "If targetJoined is false the target has not joined yet. Agent names are case-sensitive. " +
+        "The task's events (see get_task_result) record wake-failed or unclaimed when the target session did not receive it, and to-worker when a worker took it over.",
       inputSchema: {
         to: z
           .string()
@@ -873,7 +910,9 @@ export function registerTools(
     {
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
       description:
-        "Fetch a task by id, including its status and result once completed.",
+        "Fetch a task by id, including its status and result once completed. " +
+        "If its events include wake-failed or unclaimed, the target session did not receive it: look for a to-worker event (a worker took it over); " +
+        "otherwise resend it to another target or as a worker task (mode: spawn).",
       inputSchema: { task_id: z.string() },
     },
     needChannel(({ task_id }, code) =>
@@ -1012,11 +1051,29 @@ export function registerTools(
         remote: env.PLURIPLY_CODEX_REMOTE,
         queue,
         chunkMs: wakeChunkMs,
+        log,
+        report: reportWakeState,
         prepare: async () => {
           if (!state.currentChannel) await resumeChannel();
         },
       })
     : null;
+  // Plan 6c §3.2: 기동 때 한 번 깨우기 상태를 알린다 — 켜졌거나(on), 왜 꺼졌는지(off + 이유: 실행기가
+  // 넘긴 앱 서버 실패 이유, 옛 허브, 평범한 codex). 기다리지 않는다(도구 등록을 막지 않게).
+  if (reportsWake) {
+    const reason = autoWake
+      ? null
+      : typeof env.PLURIPLY_CODEX_WAKE_ERROR === "string" &&
+          env.PLURIPLY_CODEX_WAKE_ERROR.length > 0
+        ? env.PLURIPLY_CODEX_WAKE_ERROR
+        : hub.stale
+          ? // 프로토콜 11 에서는 닿지 않는다: stale 허브(< 11)는 보고를 받지 않는다(hubKnowsReports). 12 부터 의미가 생긴다.
+            "hub too old"
+          : "not started with pluriply codex";
+    void reportWakeState(
+      autoWake ? { wakeState: "on" } : { wakeState: "off", reason },
+    );
+  }
   return {
     stopWake() {
       wake?.stop();

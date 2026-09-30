@@ -68,7 +68,9 @@ export function runCodexQueue({
 /**
  * 뒤에서 agent.wait 를 돌다가 활동이 오면 이 세션의 스레드를 깨운다. 스레드 ID 를 모르면
  * 허브가 아무것도 넘기지 않는다(requireThread) — 그동안은 Stop 훅이 턴 끝에 전달한다.
- * @param {{hubRequest: (type: string, payload?: object, opts?: object) => Promise<any>, state: {threadId: string|null}, remote: string, cwd?: string, queue?: typeof runCodexQueue, sleep?: (ms: number) => Promise<void>, log?: (line: string) => void, prepare?: () => Promise<void>, chunkMs?: number}} deps
+ * 깨우기가 멈추면 report 로 허브에 알린다(Plan 6c §4): 실패 이유와 방금 받은 태스크 ID — 허브가 그 태스크를
+ * 미전달로 되돌려 대기 시한을 다시 판정한다. 보고 실패는 루프 동작을 바꾸지 않는다.
+ * @param {{hubRequest: (type: string, payload?: object, opts?: object) => Promise<any>, state: {threadId: string|null}, remote: string, cwd?: string, queue?: typeof runCodexQueue, sleep?: (ms: number) => Promise<void>, log?: (line: string) => void, prepare?: () => Promise<void>, report?: (payload: {wakeState: "failed", reason: string, returned: string[]}) => Promise<void>, chunkMs?: number}} deps
  * @returns {{stop(): void, done: Promise<void>}}
  */
 export function startCodexWake({
@@ -80,6 +82,7 @@ export function startCodexWake({
   sleep = defaultSleep,
   log = (line) => process.stderr.write(line),
   prepare = async () => {},
+  report = async () => {},
   chunkMs = WAKE_CHUNK_MS,
 }) {
   let stopped = false;
@@ -138,11 +141,24 @@ export function startCodexWake({
         }
       }
       if (lastError) {
-        // 대개 앱 서버가 사라진 세션 종료 중이다 — 이미 가져온 항목은 잃는다(스펙 §11)
+        // 대개 앱 서버가 사라진 세션 종료 중이다. 깨우기는 되살리지 않는다(Plan 6c D6).
         log(
           `pluriply: could not wake this Codex session (${lastError.message}); stopping auto-wake\n`,
         );
         stopped = true;
+        // Plan 6c §4: 방금 받아 잃어버린 태스크(incoming)를 허브에 돌려준다 — 허브가 조건이 맞는 것만
+        // 미전달로 되돌려 대기 시한을 다시 판정한다(워커로 넘기거나 보낸 쪽에 알린다).
+        try {
+          await report({
+            wakeState: "failed",
+            reason: lastError.message,
+            returned: (r.incoming ?? []).map((t) => t.taskId),
+          });
+        } catch (err) {
+          log(
+            `pluriply: could not report the wake failure to the hub (${err.message})\n`,
+          );
+        }
         return;
       }
     }

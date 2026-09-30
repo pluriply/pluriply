@@ -17,11 +17,16 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { pidAlive } from "../../src/shared/probe.js";
 import {
+  connectorEnvArgs,
   hasCdFlag,
   tuiArgs,
   runCodex,
   pluriplyRegistered,
 } from "../../src/launcher/codex.js";
+
+/** 평범한 codex 로 넘어갈 때 커넥터에 주는 깨우기 실패 이유 인자(Plan 6c §3.4) */
+const wakeErrorArg = (why) =>
+  `mcp_servers.pluriply.env.PLURIPLY_CODEX_WAKE_ERROR=${JSON.stringify(why)}`;
 
 const FAKE = fileURLToPath(
   new URL("../fixtures/fake-codex.js", import.meta.url),
@@ -170,7 +175,14 @@ test(
     const code = await s.run(["-m", "x"]);
     assert.equal(code, 0);
     const tui = s.calls().find((c) => c.role === "tui");
-    assert.deepEqual(tui.args, ["-m", "x"]);
+    // Plan 6c §3.4: 이유를 커넥터에 -c 로 넘긴다(로그 파일 경로를 담아)
+    const logPath = join(s.home, "logs", `codex-app-server-${process.pid}.log`);
+    assert.deepEqual(tui.args, [
+      "-c",
+      wakeErrorArg(`could not start the Codex app server (see ${logPath})`),
+      "-m",
+      "x",
+    ]);
     assert.match(
       s.logs.join(""),
       /pluriply: could not start the Codex app server \(see .*codex-app-server-\d+\.log\); starting plain codex without wake/,
@@ -185,7 +197,12 @@ test("on Windows it starts plain codex with a notice", async () => {
   assert.equal(code, 0);
   assert.deepEqual(
     s.calls().map((c) => [c.role, c.args]),
-    [["tui", ["x"]]],
+    [
+      [
+        "tui",
+        ["-c", wakeErrorArg("Codex wake is not supported on Windows yet"), "x"],
+      ],
+    ],
   );
   assert.equal(
     s.logs.join(""),
@@ -203,7 +220,18 @@ test(
     assert.equal(code, 0);
     assert.deepEqual(
       s.calls().map((c) => [c.role, c.args]),
-      [["tui", ["x"]]],
+      [
+        [
+          "tui",
+          [
+            "-c",
+            wakeErrorArg(
+              "pluriply is not registered in Codex (run `pluriply setup`)",
+            ),
+            "x",
+          ],
+        ],
+      ],
     );
     assert.equal(
       s.logs.join(""),
@@ -224,10 +252,15 @@ test(
     }); // config.toml 자리에 디렉터리 — EISDIR
     const code = await s.run(["x"], { userHome: brokenUserHome });
     assert.equal(code, 0);
-    assert.deepEqual(
-      s.calls().map((c) => [c.role, c.args]),
-      [["tui", ["x"]]],
-    );
+    const [[role, args]] = s.calls().map((c) => [c.role, c.args]);
+    assert.equal(role, "tui");
+    assert.deepEqual(args, [
+      "-c",
+      wakeErrorArg(
+        `could not read ${join(brokenUserHome, ".codex", "config.toml")} (EISDIR)`,
+      ),
+      "x",
+    ]);
     assert.match(
       s.logs.join(""),
       /^pluriply: could not read .*config\.toml \(EISDIR\); starting plain codex\n$/,
@@ -415,3 +448,71 @@ test("pluriplyRegistered reports a read error distinct from not-registered when 
   assert.equal(result.error.code, "EISDIR");
   assert.equal(result.error.path, join(dir, "config.toml"));
 });
+
+test("connectorEnvArgs passes home, codex binary and the wake error only when present", () => {
+  assert.deepEqual(connectorEnvArgs({ env: {} }), []);
+  assert.deepEqual(
+    connectorEnvArgs({
+      env: {
+        PLURIPLY_HOME: "/tmp/plp e2e/home",
+        PLURIPLY_CODEX_BIN: "/opt/x/codex",
+      },
+      wakeError: 'app server said "no"',
+    }),
+    [
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_HOME="/tmp/plp e2e/home"',
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_CODEX_BIN="/opt/x/codex"',
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_CODEX_WAKE_ERROR="app server said \\"no\\""',
+    ],
+  );
+  assert.deepEqual(
+    connectorEnvArgs({ env: { PLURIPLY_HOME: "" }, wakeError: null }),
+    [],
+  );
+});
+
+test(
+  "PLURIPLY_CODEX_BIN and PLURIPLY_HOME reach the connector in both the app-server and the plain-codex path",
+  { skip: skipWin },
+  async () => {
+    // 커넥터의 `codex queue` 가 실행기와 같은 codex 를 쓰게 한다 — Codex 는 부모 env 를 MCP 서버에 넘기지 않는다
+    const s = setup({
+      FAKE_CODEX_EXIT: "0",
+      PLURIPLY_HOME: "/tmp/plp e2e/home",
+      PLURIPLY_CODEX_BIN: "/opt/x/codex-wrapper",
+    });
+    await s.run(["x"]);
+    const app = s.calls().find((c) => c.role === "app");
+    assert.deepEqual(app.args.slice(0, 7), [
+      "app-server",
+      "-c",
+      app.args[2],
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_HOME="/tmp/plp e2e/home"',
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_CODEX_BIN="/opt/x/codex-wrapper"',
+    ]);
+    const plain = setup({
+      FAKE_CODEX_APP_FAIL: "1",
+      FAKE_CODEX_EXIT: "0",
+      PLURIPLY_HOME: "/tmp/plp e2e/home",
+      PLURIPLY_CODEX_BIN: "/opt/x/codex-wrapper",
+    });
+    await plain.run(["x"]);
+    const tui = plain.calls().find((c) => c.role === "tui");
+    assert.deepEqual(tui.args.slice(0, 4), [
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_HOME="/tmp/plp e2e/home"',
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_CODEX_BIN="/opt/x/codex-wrapper"',
+    ]);
+    assert.match(
+      tui.args[5],
+      /^mcp_servers\.pluriply\.env\.PLURIPLY_CODEX_WAKE_ERROR=/,
+    );
+    assert.equal(tui.args.at(-1), "x");
+  },
+);

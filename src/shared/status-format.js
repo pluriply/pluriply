@@ -1,4 +1,6 @@
 // Plan 6a(스펙 §6): `pluriply status` 의 판정·출력. 디스크 지문은 주입한 함수로만 읽는다(테스트 가능).
+// Plan 6c(스펙 §5): 세션의 깨우기 상태(wake on/off/failed)와 최근 24시간의 문제(problems)를 보여 준다 —
+// 문제가 없으면 출력은 6a 와 같다.
 import { codeFingerprint } from "./fingerprint.js";
 
 const APP = {
@@ -8,10 +10,29 @@ const APP = {
 };
 const MARK = { restart: "✗", unknown: "?", ok: "✓" };
 const ORDER = { restart: 0, unknown: 1, ok: 2 };
+/** problems 의 요청 앞 글자 수와 사건 설명 글자 수 */
+const REQUEST_CHARS = 40;
+const DETAIL_CHARS = 70;
+/** 깨우기 이유·허브 사건 설명의 글자 수(한 줄 유지) */
+const REASON_CHARS = 120;
 
 /** 공백·셸 특수문자가 있으면만 큰따옴표로 감싼다 @param {string} p @returns {string} */
 function quotePath(p) {
   return /[\s"\\$`]/.test(p) ? `"${p.replace(/(["\\$`])/g, "\\$1")}"` : p;
+}
+
+/**
+ * 커넥터·허브가 넘긴 글을 터미널에 안전한 한 줄로 만들어 n 자에서 자른다("…").
+ * ANSI 이스케이프를 먼저 지우고, 남은 제어 문자는 공백으로 바꾼다(줄바꿈이 표를 깨거나 이스케이프가 줄을 숨기지 않게).
+ * @param {unknown} text @param {number} [n] @returns {string}
+ */
+function cut(text, n = Infinity) {
+  const one = String(text ?? "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return one.length > n ? `${one.slice(0, n)}…` : one;
 }
 
 /** @param {object} s 세션 @returns {string} 도구별 재시작 방법(영어) */
@@ -60,13 +81,32 @@ export function formatWhen(iso, now = new Date()) {
 }
 
 /**
- * @param {{ping: {port: number, pid: number, version?: string, protocol?: number}, sessions: object|null, error: string|null, fingerprint?: typeof codeFingerprint}} o
+ * 문제 태스크 한 줄의 사건 요약(Plan 6c §5.1): 사건 종류를 순서대로 잇고, 마지막이 워커 이관이 아니면
+ * 그 사유를 붙인다. 예: `wake-failed, then to-worker`, `unclaimed — no live session picked it up within 180s`.
+ * @param {Array<{kind: string, detail?: string}>} events @returns {string}
+ */
+export function summarizeEvents(events) {
+  const list = Array.isArray(events)
+    ? events.filter((e) => e && typeof e === "object")
+    : [];
+  if (list.length === 0) return "";
+  const chain = list.map((e) => e.kind).join(", then ");
+  const last = list[list.length - 1];
+  return last.kind === "to-worker" || !last.detail
+    ? chain
+    : `${chain} — ${cut(last.detail, DETAIL_CHARS)}`;
+}
+
+/**
+ * @param {{ping: {port: number, pid: number, version?: string, protocol?: number}, sessions: object|null, error: string|null, fingerprint?: typeof codeFingerprint, logFile?: string|null}} o
+ *   logFile 은 자동 기동 허브의 로그 파일(CLI 가 홈으로 만든다). problems 는 hub.sessions 응답의 것(옛 허브면 비어 있다).
  */
 export function buildStatus({
   ping,
   sessions,
   error,
   fingerprint = codeFingerprint,
+  logFile = null,
 }) {
   const cache = new Map();
   const onDisk = (root, part) => {
@@ -102,6 +142,14 @@ export function buildStatus({
           : "restart"
         : "unknown",
   };
+  const problems = {
+    tasks: Array.isArray(sessions?.problems?.tasks)
+      ? sessions.problems.tasks
+      : [],
+    events: Array.isArray(sessions?.problems?.events)
+      ? sessions.problems.events
+      : [],
+  };
   if (!sessions)
     return {
       hub,
@@ -109,7 +157,9 @@ export function buildStatus({
       workers: 0,
       sessionsError:
         error ??
-        `hub protocol ${hub.protocol} < 10; run \`pluriply hub restart\` to see sessions`,
+        `hub protocol ${hub.protocol} < 11; run \`pluriply hub restart\` to see sessions`,
+      problems,
+      logFile,
     };
   const all = sessions.sessions ?? [];
   const list = all
@@ -125,16 +175,26 @@ export function buildStatus({
           : disk.fingerprint === s.fingerprint
             ? "ok"
             : "restart";
+      const wakeState = s.wakeState ?? null;
       return {
         ...s,
+        wakeState,
+        wakeReason: s.wakeReason ?? null,
+        wakeAt: s.wakeAt ?? null,
         onDisk: disk,
         state,
         restart: state === "restart" ? restartHint(s) : null,
+        // Plan 6c: 깨우기가 멈춘 세션은 `pluriply codex` 로 다시 여는 것이 고치는 방법이다(D6). 옛 코드
+        // 표시가 우선한다 — 그 재시작 안내가 이미 같은 말을 한다.
+        fix:
+          state !== "restart" && wakeState === "failed"
+            ? restartHint({ ...s, wake: true })
+            : null,
       };
     })
     .sort(
       (a, b) =>
-        ORDER[a.state] - ORDER[b.state] ||
+        rank(a) - rank(b) ||
         String(a.startedAt ?? a.connectedAt).localeCompare(
           String(b.startedAt ?? b.connectedAt),
         ),
@@ -144,7 +204,32 @@ export function buildStatus({
     sessions: list,
     workers: all.length - list.length,
     sessionsError: null,
+    problems,
+    logFile,
   };
+}
+
+/** 정렬 순위: 재시작 필요 → 모름 → (같은 상태 안에서) 깨우기 실패 먼저 */
+function rank(s) {
+  return ORDER[s.state] * 2 + (s.wakeState === "failed" ? 0 : 1);
+}
+
+/** 세션 줄의 표시: 옛 코드 표시가 우선, 그다음 깨우기 실패 `!`, 깨우기 꺼짐 `·` @param {object} s */
+function markOf(s) {
+  if (s.state !== "ok") return MARK[s.state];
+  if (s.wakeState === "failed") return "!";
+  if (s.wakeState === "off") return "·";
+  return MARK.ok;
+}
+
+/** 세션 줄 끝의 깨우기 상태(보고가 있을 때만) @param {object} s @param {Date} now @returns {string} */
+function wakeText(s, now) {
+  if (s.wakeState === "on") return "   wake on";
+  if (s.wakeState === "failed")
+    return `   wake failed ${formatWhen(s.wakeAt, now)}: ${cut(s.wakeReason ?? "no reason given", REASON_CHARS)}`;
+  if (s.wakeState === "off")
+    return `   wake off (${cut(s.wakeReason ?? "no reason given", REASON_CHARS)})`;
+  return "";
 }
 
 /** @param {ReturnType<typeof buildStatus>} st @param {{home?: string, now?: Date}} [o] @returns {string[]} */
@@ -195,9 +280,26 @@ export function formatStatus(st, { home, now = new Date() } = {}) {
               : `${s.version ?? "?"} → ${s.onDisk?.version ?? "?"} on disk`
             : `${s.version ?? "?"} (can't read the install)`;
     lines.push(
-      `  ${MARK[s.state]} ${String(s.tool).padEnd(12)} ${shortPath(s.cwd, home).padEnd(24)} since ${formatWhen(s.startedAt ?? s.connectedAt, now).padEnd(11)} code ${codeText}`,
+      `  ${markOf(s)} ${String(s.tool).padEnd(12)} ${shortPath(cut(s.cwd) || null, home).padEnd(24)} since ${formatWhen(s.startedAt ?? s.connectedAt, now).padEnd(11)} code ${codeText}${wakeText(s, now)}`,
     );
     if (s.restart) lines.push(`      restart: ${s.restart}`);
+    else if (s.fix) lines.push(`      fix: ${s.fix}`);
+  }
+  // Plan 6c §5.1: 최근 24시간의 문제 — 있을 때만 절이 생긴다
+  const { tasks, events } = st.problems ?? { tasks: [], events: [] };
+  if (tasks.length + events.length > 0) {
+    lines.push("", "problems (last 24h)");
+    for (const p of tasks)
+      lines.push(
+        `  ${formatWhen(p.at, now)}  task ${cut(p.taskId)}  → ${cut(p.to)}   ${summarizeEvents(p.events)}   "${cut(p.request, REQUEST_CHARS)}"`,
+      );
+    for (const e of events)
+      lines.push(
+        e.kind === "hook-unpaired"
+          ? `  ${formatWhen(e.at, now)}  hook         ${cut(e.tool ?? "?")} ${shortPath(cut(e.cwd) || null, home)}   ${cut(e.detail, REASON_CHARS)}`
+          : `  ${formatWhen(e.at, now)}  hub          ${cut(e.detail, REASON_CHARS)}`,
+      );
+    if (st.logFile) lines.push(`  logs: ${shortPath(st.logFile, home)}`);
   }
   return lines;
 }

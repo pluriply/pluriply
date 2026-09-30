@@ -132,7 +132,8 @@ export class HubClient extends EventEmitter {
    *   home이 없으면 재접속하지 않는다. reconnectTotalMs는 재접속을 포기하기까지의 총 시간
    *   (기본 RECONNECT_TOTAL_MS), stableMs는 연결이 자리 잡았다고 보는 최소 유지 시간
    *   (기본 STABLE_MS) — 둘 다 테스트에서 짧게 만드는 데 쓴다. token은 이 소켓이 업그레이드
-   *   헤더로 보낸 허브 연결 토큰(Plan 4f)이다.
+   *   헤더로 보낸 허브 연결 토큰(Plan 4f)이다. hubOps 는 재접속이 쓰는 {liveHub, spawnHub} —
+   *   테스트가 대기 중인 liveHub 를 흉내 내는 데만 쓴다.
    */
   constructor(
     ws,
@@ -141,10 +142,12 @@ export class HubClient extends EventEmitter {
       reconnectTotalMs = RECONNECT_TOTAL_MS,
       stableMs = STABLE_MS,
       token,
+      hubOps = { liveHub, spawnHub },
     } = {},
   ) {
     super();
     this.home = home;
+    this.hubOps = hubOps;
     this.reconnectTotalMs = reconnectTotalMs;
     this.stableMs = stableMs;
     this.pending = new Map();
@@ -276,8 +279,15 @@ export class HubClient extends EventEmitter {
         );
       }
       try {
-        const { port, info } = await ensureHub({ home: this.home });
-        if (this.closed) return; // close()가 ensureHub 대기 중에 호출됨
+        // ensureHub 를 둘로 나눠 그 사이에 closed 를 본다: 허브가 멈추며 락을 지운 직후 close() 가
+        // liveHub 대기 중에 오면, 스폰하지 않고 끝낸다(닫힌 클라이언트가 분리된 허브를 새로 띄워
+        // 남기지 않게). 스폰 도중에 닫혔으면 그 허브는 그대로 둔다 — 그 사이 다른 커넥터가 붙었을
+        // 수 있고, 허브는 원래 커넥터보다 오래 사는 상주 프로세스다.
+        const live = await this.hubOps.liveHub(this.home);
+        if (this.closed) return; // close()가 liveHub 대기 중에 호출됨
+        const info = live ?? (await this.hubOps.spawnHub({ home: this.home }));
+        if (this.closed) return; // close()가 spawnHub 대기 중에 호출됨
+        const port = info.port;
         const ws = await tryConnect(port, 3000, info.token);
         if (this.closed) {
           ws?.terminate(); // close()가 tryConnect 대기 중에 호출됨: 새 소켓을 붙이지 않는다
@@ -369,6 +379,7 @@ export class HubClient extends EventEmitter {
     home = pluriplyHome(),
     reconnectTotalMs,
     stableMs,
+    hubOps,
   } = {}) {
     const { port, info } = await ensureHub({ home });
     const ws = await tryConnect(port, 3000, info.token);
@@ -378,6 +389,7 @@ export class HubClient extends EventEmitter {
       reconnectTotalMs,
       stableMs,
       token: info.token,
+      hubOps,
     });
     client.stale = staleFrom(info, port);
     return client;
