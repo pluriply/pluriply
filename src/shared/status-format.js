@@ -22,24 +22,32 @@ function quotePath(p) {
 }
 
 /**
- * 커넥터·허브가 넘긴 글을 터미널에 안전한 한 줄로 만들어 n 자에서 자른다("…").
- * ANSI 이스케이프를 먼저 지우고, 남은 제어 문자는 공백으로 바꾼다(줄바꿈이 표를 깨거나 이스케이프가 줄을 숨기지 않게).
- * @param {unknown} text @param {number} [n] @returns {string}
+ * 커넥터·허브가 넘긴 글을 터미널에 안전한 한 줄로 만든다(자르지 않는다 — 복사해 쓰는 경로·버전용).
+ * ANSI 이스케이프를 먼저 지우고, 남은 제어 문자는 공백으로 바꾸고, 공백을 압축한다.
+ * @param {unknown} text @returns {string}
  */
-function cut(text, n = Infinity) {
-  const one = String(text ?? "")
+function clean(text) {
+  return String(text ?? "")
     .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
     .replace(/[\x00-\x1f\x7f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** clean 한 뒤 n 자에서 자른다("…") @param {unknown} text @param {number} [n] @returns {string} */
+function cut(text, n = Infinity) {
+  const one = clean(text);
   return one.length > n ? `${one.slice(0, n)}…` : one;
 }
 
 /** @param {object} s 세션 @returns {string} 도구별 재시작 방법(영어) */
 export function restartHint(s) {
-  const id = s.threadId;
-  const where = s.cwd ?? "its folder";
-  const cd = s.cwd ? `cd ${quotePath(s.cwd)} && ` : "";
+  const id = s.threadId == null ? s.threadId : clean(s.threadId);
+  const cwd = s.cwd ? clean(s.cwd) : null;
+  const tool = clean(String(s.tool)); // 빠진 값은 예전처럼 "undefined" 로 보인다
+  const where = cwd || "its folder";
+  const cd = cwd ? `cd ${quotePath(cwd)} && ` : "";
+  s = { ...s, tool };
   if (s.tool === "claude-code")
     return id
       ? `/exit, then  ${cd}claude --resume ${id}`
@@ -53,7 +61,7 @@ export function restartHint(s) {
       ? `exit, then  ${cd}codex resume ${id}`
       : `exit and start codex again in ${where}`;
   }
-  return `quit and reopen ${APP[s.tool] ?? s.tool}`;
+  return `quit and reopen ${APP[tool] ?? tool}`;
 }
 
 /** 홈은 `~`, 길면 가운데를 `…` 로 @param {string|null} p @param {string} [home] @returns {string} */
@@ -236,9 +244,9 @@ function wakeText(s, now) {
 export function formatStatus(st, { home, now = new Date() } = {}) {
   const h = st.hub;
   const lines = [
-    `hub      running (port ${h.port}, pid ${h.pid}, version ${h.version ?? "unknown"}, protocol ${h.protocol})`,
+    `hub      running (port ${h.port}, pid ${h.pid}, version ${clean(h.version ?? "unknown")}, protocol ${h.protocol})`,
   ];
-  const code = (v, fp) => `${v ?? "?"}${fp ? ` (${fp})` : ""}`;
+  const code = (v, fp) => `${clean(v ?? "?")}${fp ? ` (${clean(fp)})` : ""}`;
   if (h.fingerprint) {
     const verdict =
       h.state === "ok"
@@ -246,12 +254,20 @@ export function formatStatus(st, { home, now = new Date() } = {}) {
         : h.state === "restart"
           ? "✗ restart: pluriply hub restart"
           : "? can't read the installed code";
+    // 지문이 같고 버전 번호만 다르면 "같은 코드"다(버전은 지문에 들어가지 않는다)
+    const same =
+      h.state === "ok" &&
+      h.version != null &&
+      h.onDisk?.version != null &&
+      h.version !== h.onDisk.version;
     lines.push(
-      `         code ${code(h.version, h.fingerprint)}  on disk ${h.onDisk ? code(h.onDisk.version, h.onDisk.fingerprint) : "?"}  ${verdict}`,
+      same
+        ? `         code ${clean(h.version ?? "?")} (same code as ${clean(h.onDisk.version)} on disk)  ${verdict}`
+        : `         code ${code(h.version, h.fingerprint)}  on disk ${h.onDisk ? code(h.onDisk.version, h.onDisk.fingerprint) : "?"}  ${verdict}`,
     );
   } else if (st.sessions !== null) {
     lines.push(
-      `         code ${h.version ?? "?"} (fingerprint unavailable)  ? can't read the hub's code`,
+      `         code ${clean(h.version ?? "?")} (fingerprint unavailable)  ? can't read the hub's code`,
     );
   }
   if (!st.sessions) {
@@ -263,24 +279,28 @@ export function formatStatus(st, { home, now = new Date() } = {}) {
     `sessions ${st.sessions.length} connected, ${need} need a restart   (workers: ${st.workers} running)`,
   );
   for (const s of st.sessions) {
+    const ver = clean(s.version ?? "?");
+    const diskVer = s.onDisk?.version != null ? clean(s.onDisk.version) : null;
     const sameVersion =
       s.version != null && s.onDisk?.version != null
         ? s.version === s.onDisk.version
         : false;
     const codeText =
       s.state === "ok"
-        ? (s.version ?? "?")
+        ? s.version != null && diskVer != null && ver !== diskVer
+          ? `${ver} (same code as ${diskVer} on disk)`
+          : ver
         : !s.fingerprint
           ? s.version
-            ? `${s.version} (fingerprint unavailable)`
+            ? `${ver} (fingerprint unavailable)`
             : "unknown (older connector)"
           : s.state === "restart"
             ? sameVersion
               ? `${code(s.version, s.fingerprint)} → ${code(s.onDisk.version, s.onDisk.fingerprint)} on disk`
-              : `${s.version ?? "?"} → ${s.onDisk?.version ?? "?"} on disk`
-            : `${s.version ?? "?"} (can't read the install)`;
+              : `${ver} → ${diskVer ?? "?"} on disk`
+            : `${ver} (can't read the install)`;
     lines.push(
-      `  ${markOf(s)} ${String(s.tool).padEnd(12)} ${shortPath(cut(s.cwd) || null, home).padEnd(24)} since ${formatWhen(s.startedAt ?? s.connectedAt, now).padEnd(11)} code ${codeText}${wakeText(s, now)}`,
+      `  ${markOf(s)} ${clean(String(s.tool)).padEnd(12)} ${shortPath(cut(s.cwd) || null, home).padEnd(24)} since ${formatWhen(s.startedAt ?? s.connectedAt, now).padEnd(11)} code ${codeText}${wakeText(s, now)}`,
     );
     if (s.restart) lines.push(`      restart: ${s.restart}`);
     else if (s.fix) lines.push(`      fix: ${s.fix}`);

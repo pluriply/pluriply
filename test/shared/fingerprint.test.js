@@ -39,7 +39,7 @@ test("a part's fingerprint changes with its own files, not the other part's", ()
   assert.notEqual(codeFingerprint(root, "hub").fingerprint, hub0);
 });
 
-test("shared files, file names and the version count for both parts", () => {
+test("shared files and file names count for both parts", () => {
   const root = fakeRoot();
   const hub0 = codeFingerprint(root, "hub").fingerprint;
   const conn0 = codeFingerprint(root, "connector").fingerprint;
@@ -52,11 +52,23 @@ test("shared files, file names and the version count for both parts", () => {
   rmSync(join(root, "src/hub/a.js"));
   writeFileSync(join(root, "src/hub/b.js"), "hub a");
   assert.notEqual(codeFingerprint(root, "hub").fingerprint, hub1);
-  const hub2 = codeFingerprint(root, "hub").fingerprint;
+});
+
+test("the package version is not part of the fingerprint (display only)", () => {
+  const root = fakeRoot();
+  const before = codeFingerprint(root, "hub");
+  const connBefore = codeFingerprint(root, "connector");
   writeFileSync(join(root, "package.json"), '{"version":"1.2.4"}');
   const after = codeFingerprint(root, "hub");
   assert.equal(after.version, "1.2.4");
-  assert.notEqual(after.fingerprint, hub2);
+  assert.equal(after.fingerprint, before.fingerprint);
+  assert.equal(
+    codeFingerprint(root, "connector").fingerprint,
+    connBefore.fingerprint,
+  );
+  // 파일 한 바이트가 바뀌면 다르다
+  writeFileSync(join(root, "src/hub/a.js"), "hub b");
+  assert.notEqual(codeFingerprint(root, "hub").fingerprint, before.fingerprint);
 });
 
 test("dotfiles and editor temp files under a part are ignored", () => {

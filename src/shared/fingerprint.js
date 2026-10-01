@@ -1,6 +1,9 @@
 // Plan 6a(스펙 §4): 부품별 코드 지문. 프로세스가 기동 때 남긴 지문과 디스크의 지문을 비교해
 // 옛 코드로 도는 허브·커넥터를 가린다. npm 설치본(허브가 번들 한 파일)과 개발 체크아웃 모두
 // "그 폴더 아래 전부"라는 같은 규칙으로 계산한다 — 비교는 늘 같은 설치본 안에서 일어난다.
+// version 은 지문에 넣지 않는다(코드가 같으면 버전만 올려도 재시작 대상이 아니다). 반환값의 version 은 표시용이다.
+// 한계: 커넥터는 hub-client.js 가 `../hub/index.js` 로 들여오는 허브 수명주기 코드(liveHub/spawnHub)와 node_modules
+// 의존성도 실행하지만 커넥터 지문은 이를 덮지 않는다 — 그것만 바꾼 릴리스는 커넥터 재시작 대상으로 표시되지 않는다(드물어 감수한다).
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
@@ -37,7 +40,6 @@ export function codeFingerprint(root, part) {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     const version = typeof pkg.version === "string" ? pkg.version : null;
     const h = createHash("sha256");
-    h.update(`version\0${version}\0`);
     for (const d of dirs) {
       const files = listFiles(join(root, d))
         .map((p) => relative(root, p).split(sep).join("/"))

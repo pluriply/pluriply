@@ -701,3 +701,120 @@ test("connector-supplied text is flattened to one line without escape bytes", ()
   assert.match(text, /hook {9}claude-code \/w x {3}line one red tail$/m);
   assert.match(text, /hub {10}line one red tail$/m);
 });
+
+test("same fingerprint but a different version is ok and says 'same code as' (hub and session)", () => {
+  const d = disk({
+    "/inst|hub": { version: "0.9.1", fingerprint: "hhhhhhhhhhhh" },
+    "/inst|connector": { version: "0.9.1", fingerprint: "cccccccccccc" },
+  });
+  const st = buildStatus({
+    ping: PING,
+    sessions: { hub: HUB, sessions: [sess({})] },
+    error: null,
+    fingerprint: d.fn,
+  });
+  assert.equal(st.hub.state, "ok");
+  assert.equal(st.sessions[0].state, "ok");
+  assert.equal(st.sessions[0].restart, null);
+  const lines = formatStatus(st, {
+    home: "/Users/me",
+    now: new Date("2026-09-28T10:00:00"),
+  });
+  const text = lines.join("\n");
+  assert.match(
+    text,
+    /code 0\.8\.0 \(same code as 0\.9\.1 on disk\)  ✓ up to date/,
+  );
+  assert.match(text, /✓ codex .*code 0\.8\.0 \(same code as 0\.9\.1 on disk\)/);
+});
+
+test("same fingerprint and same version prints the plain version", () => {
+  const d = disk(SAME);
+  const st = buildStatus({
+    ping: PING,
+    sessions: { hub: HUB, sessions: [sess({})] },
+    error: null,
+    fingerprint: d.fn,
+  });
+  const text = formatStatus(st, { home: "/Users/me" }).join("\n");
+  assert.doesNotMatch(text, /same code as/);
+  assert.match(text, /code 0\.8\.0 \(hhhhhhhhhhhh\)  on disk/);
+});
+
+test("control characters and ANSI in tool, version, cwd never reach the output", () => {
+  const d = disk({
+    ...SAME,
+    "/inst|connector": { version: "0.8.1", fingerprint: "dddddddddddd" },
+  });
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [
+        sess({
+          tool: "co\x1b[31mdex\nx",
+          version: "0.8.0\x1b[2J\r\n",
+          cwd: "/a/b\x1b[0m\nc d",
+        }),
+        sess({
+          instanceId: "codex#2",
+          tool: "claude-code",
+          version: "9\x07.9",
+          cwd: "/w\nx",
+          threadId: null,
+        }),
+      ],
+    },
+    error: null,
+    fingerprint: d.fn,
+  });
+  const lines = formatStatus(st, { home: "/Users/me" });
+  const text = lines.join("\n");
+  assert.doesNotMatch(text, /[\x00-\x09\x0b-\x1f\x7f]/);
+  for (const l of lines) assert.ok(!l.includes("\r"));
+  assert.match(text, /restart: quit and reopen codex x\n/);
+  assert.match(text, /restart: \/exit and start claude again in \/w x/);
+  const hint = restartHint({
+    tool: "we\x1b[1mird\n",
+    cwd: "/x\ny",
+    threadId: null,
+  });
+  assert.equal(hint, "quit and reopen weird");
+  assert.equal(
+    restartHint({ tool: "claude-code", cwd: "/x\x1b[0m\ny", threadId: "t1" }),
+    '/exit, then  cd "/x y" && claude --resume t1',
+  );
+});
+
+test("'same code as' needs both versions; a null process version stays plain", () => {
+  const d = disk({
+    "/inst|hub": { version: "0.9.1", fingerprint: "hhhhhhhhhhhh" },
+    "/inst|connector": { version: "0.9.1", fingerprint: "cccccccccccc" },
+  });
+  const st = buildStatus({
+    ping: { ...PING, version: null },
+    sessions: {
+      hub: { ...HUB, version: null },
+      sessions: [sess({ version: null })],
+    },
+    error: null,
+    fingerprint: d.fn,
+  });
+  const text = formatStatus(st, { home: "/Users/me" }).join("\n");
+  assert.doesNotMatch(text, /same code as/);
+  assert.match(text, /✓ codex .*code \?$/m);
+});
+
+test("hub running line version is sanitized and a missing tool keeps the old rendering", () => {
+  const d = disk(SAME);
+  const st = buildStatus({
+    ping: { ...PING, version: "0.8.0\x1b[2J\nX" },
+    sessions: { hub: { ...HUB, version: "0.8.0\x1b[2J\nX" }, sessions: [] },
+    error: null,
+    fingerprint: d.fn,
+  });
+  const lines = formatStatus(st);
+  assert.match(lines[0], /version 0\.8\.0 X,/);
+  assert.doesNotMatch(lines.join("\n"), /\x1b/);
+  assert.equal(restartHint({ cwd: "/x" }), "quit and reopen undefined");
+});

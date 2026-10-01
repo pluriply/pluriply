@@ -128,12 +128,13 @@ export class HubClient extends EventEmitter {
 
   /**
    * @param {WebSocket} ws
-   * @param {{home?: string, reconnectTotalMs?: number, stableMs?: number, token?: string}} [opts]
+   * @param {{home?: string, reconnectTotalMs?: number, stableMs?: number, token?: string, spawn?: boolean}} [opts]
    *   home이 없으면 재접속하지 않는다. reconnectTotalMs는 재접속을 포기하기까지의 총 시간
    *   (기본 RECONNECT_TOTAL_MS), stableMs는 연결이 자리 잡았다고 보는 최소 유지 시간
    *   (기본 STABLE_MS) — 둘 다 테스트에서 짧게 만드는 데 쓴다. token은 이 소켓이 업그레이드
    *   헤더로 보낸 허브 연결 토큰(Plan 4f)이다. hubOps 는 재접속이 쓰는 {liveHub, spawnHub} —
-   *   테스트가 대기 중인 liveHub 를 흉내 내는 데만 쓴다.
+   *   테스트가 대기 중인 liveHub 를 흉내 내는 데만 쓴다. spawn 이 false 면(워커 커넥터)
+   *   재접속에서도 허브를 띄우지 않고 살아 있는 허브만 찾는다 — 없으면 그 회차는 실패로 센다.
    */
   constructor(
     ws,
@@ -143,10 +144,12 @@ export class HubClient extends EventEmitter {
       stableMs = STABLE_MS,
       token,
       hubOps = { liveHub, spawnHub },
+      spawn = true,
     } = {},
   ) {
     super();
     this.home = home;
+    this.spawn = spawn;
     this.hubOps = hubOps;
     this.reconnectTotalMs = reconnectTotalMs;
     this.stableMs = stableMs;
@@ -285,6 +288,8 @@ export class HubClient extends EventEmitter {
         // 수 있고, 허브는 원래 커넥터보다 오래 사는 상주 프로세스다.
         const live = await this.hubOps.liveHub(this.home);
         if (this.closed) return; // close()가 liveHub 대기 중에 호출됨
+        // 워커 커넥터(spawn:false)는 허브를 띄우지 않는다 — 없으면 이 회차는 실패, 기존 백오프·기한을 따른다
+        if (!live && !this.spawn) continue;
         const info = live ?? (await this.hubOps.spawnHub({ home: this.home }));
         if (this.closed) return; // close()가 spawnHub 대기 중에 호출됨
         const port = info.port;
@@ -373,15 +378,29 @@ export class HubClient extends EventEmitter {
 
   /**
    * 허브에 접속한다. 허브 프로토콜이 커넥터보다 낮으면 `stale`에 기록하되 접속은 유지한다.
-   * @param {{home?: string, reconnectTotalMs?: number, stableMs?: number}} [opts] @returns {Promise<HubClient>}
+   * @param {{home?: string, reconnectTotalMs?: number, stableMs?: number, spawn?: boolean}} [opts]
+   *   spawn:false(워커 커넥터)면 처음 접속도 재접속도 살아 있는 허브만 쓴다 — 없으면 던진다.
+   * @returns {Promise<HubClient>}
    */
   static async connect({
     home = pluriplyHome(),
     reconnectTotalMs,
     stableMs,
     hubOps,
+    spawn = true,
   } = {}) {
-    const { port, info } = await ensureHub({ home });
+    let port;
+    let info;
+    if (spawn) {
+      ({ port, info } = await ensureHub({ home }));
+    } else {
+      info = await (hubOps?.liveHub ?? liveHub)(home);
+      if (!info)
+        throw new Error(
+          "no live pluriply hub (worker connectors do not start one)",
+        );
+      port = info.port;
+    }
     const ws = await tryConnect(port, 3000, info.token);
     if (!ws) throw new Error("could not connect to pluriply hub");
     const client = new HubClient(ws, {
@@ -390,6 +409,7 @@ export class HubClient extends EventEmitter {
       stableMs,
       token: info.token,
       hubOps,
+      spawn,
     });
     client.stale = staleFrom(info, port);
     return client;
