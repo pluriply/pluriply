@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatStopReason, runStopHook } from "../../src/setup/hook-stop.js";
+import {
+  HOST_PID_DEPTH,
+  formatStopReason,
+  hostPidChain,
+  parentChain,
+  parsePsTable,
+  runStopHook,
+} from "../../src/setup/hook-stop.js";
+
+/** 테스트가 훅에 심는 부모 사슬(훅 → 셸 → 도구) */
+const CHAIN = [4242, 4200, 4100];
 
 const poll = {
   tool: "claude-code",
@@ -120,12 +130,14 @@ test("runStopHook blocks with the reason when the hub has items, and swallows er
   const fake = (reply) => async () => ({
     request: async (type, payload) => {
       assert.equal(type, "hook.poll");
-      // hostPid: 훅을 띄운 도구 프로세스 — 같은 세션의 커넥터도 그 자식이라 허브가 인스턴스를 가린다
+      // hostPid: 훅을 띄운 도구 프로세스 — 같은 세션의 커넥터도 그 자식이라 허브가 인스턴스를 가린다.
+      // hostPids(Plan 6d): 그 위로의 부모 사슬 — 셸을 거친 훅도 도구를 찾는다
       const { sessionId: _s, ...rest } = payload;
       assert.deepEqual(rest, {
         tool: "codex",
         cwd: "/repo",
         hostPid: process.ppid,
+        hostPids: CHAIN,
       });
       return typeof reply === "function" ? reply() : reply;
     },
@@ -137,6 +149,7 @@ test("runStopHook blocks with the reason when the hub has items, and swallows er
     agent: "codex",
     input: JSON.stringify({ cwd: "/repo", session_id: "s" }),
     connect: fake({ ...poll, tool: "codex" }),
+    hostPids: () => CHAIN,
   });
   assert.equal(ok.decision, "block");
   assert.match(ok.reason, /task_1/);
@@ -324,6 +337,7 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
         tool: "antigravity",
         cwd: "/ws",
         hostPid: process.ppid,
+        hostPids: CHAIN,
       });
       return typeof reply === "function" ? reply() : reply;
     },
@@ -335,6 +349,7 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
     agent: "antigravity",
     input: JSON.stringify({ conversationId: "c", workspacePaths: ["/ws"] }),
     connect: fake({ ...poll, tool: "antigravity" }),
+    hostPids: () => CHAIN,
   });
   assert.equal(r.decision, "continue");
   assert.match(r.reason, /task_1/);
@@ -347,6 +362,7 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
         tool: "antigravity",
         cwd: "/fallback",
         hostPid: process.ppid,
+        hostPids: CHAIN,
       });
       return { ...poll, tool: "antigravity" };
     },
@@ -357,6 +373,7 @@ test("runStopHook maps workspacePaths[0] for antigravity and answers decision co
     input: JSON.stringify({ conversationId: "c" }),
     cwd: "/fallback",
     connect: fake2,
+    hostPids: () => CHAIN,
   });
   assert.equal(r2.decision, "continue");
 });
@@ -388,4 +405,137 @@ test("runStopHook passes the tool's session id so the hub can wake that Codex th
   assert.equal(seen[0].sessionId, "019a-t");
   assert.equal("sessionId" in seen[1], false);
   assert.equal("sessionId" in seen[2], false);
+});
+
+test("parentChain follows the ps table upward, stops at pid 1, unknown pids and cycles, and caps at HOST_PID_DEPTH", () => {
+  assert.equal(HOST_PID_DEPTH, 6);
+  const table = parsePsTable(
+    "  500   400\n 400 300\n300 1\n  7 7\nbad line\n 900 800\n800 900\n",
+  );
+  assert.deepEqual(
+    [...table.entries()].sort((a, b) => a[0] - b[0]),
+    [
+      [7, 7],
+      [300, 1],
+      [400, 300],
+      [500, 400],
+      [800, 900],
+      [900, 800],
+    ],
+  );
+  assert.deepEqual(parentChain(500, table), [500, 400, 300]); // pid 1 에서 끊는다
+  assert.deepEqual(parentChain(400, table), [400, 300]);
+  assert.deepEqual(parentChain(12345, table), [12345]); // 표에 없어도 자기 자신은 남는다
+  assert.deepEqual(parentChain(900, table), [900, 800]); // 순환
+  assert.deepEqual(parentChain(7, table), [7]); // 자기 순환
+  assert.deepEqual(parentChain(1, table), []);
+  assert.deepEqual(parentChain(0, table), []);
+  assert.deepEqual(parentChain(undefined, table), []);
+  const deep = new Map();
+  for (let i = 20; i > 1; i--) deep.set(i, i - 1);
+  assert.deepEqual(parentChain(20, deep), [20, 19, 18, 17, 16, 15]);
+  assert.deepEqual(parentChain(20, deep, 2), [20, 19]);
+});
+
+test("hostPidChain reads one ps run and falls back to [ppid] on Windows, failure, timeout or an empty table", () => {
+  const calls = [];
+  const ok = (cmd, args, o) => {
+    calls.push([cmd, args, o.timeout]);
+    return { status: 0, stdout: " 77 66\n 66 55\n 55 1\n" };
+  };
+  assert.deepEqual(
+    hostPidChain({ ppid: 77, platform: "darwin", exec: ok }),
+    [77, 66, 55],
+  );
+  assert.deepEqual(calls, [["ps", ["-A", "-o", "pid=,ppid="], 1000]]);
+  assert.deepEqual(
+    hostPidChain({ ppid: 77, platform: "win32", exec: ok }),
+    [77],
+  );
+  assert.deepEqual(
+    hostPidChain({
+      ppid: 77,
+      platform: "linux",
+      exec: () => ({ status: 1, stdout: "" }),
+    }),
+    [77],
+  );
+  assert.deepEqual(
+    hostPidChain({
+      ppid: 77,
+      platform: "linux",
+      exec: () => ({ status: null, stdout: null }),
+    }),
+    [77],
+  );
+  assert.deepEqual(
+    hostPidChain({
+      ppid: 77,
+      platform: "linux",
+      exec: () => {
+        throw new Error("ENOENT");
+      },
+    }),
+    [77],
+  );
+  // 표가 비었거나 ppid 가 1 이면 [ppid] — 허브가 pid ≤ 1 을 무시한다
+  assert.deepEqual(
+    hostPidChain({
+      ppid: 77,
+      platform: "linux",
+      exec: () => ({ status: 0, stdout: "" }),
+    }),
+    [77],
+  );
+  assert.deepEqual(hostPidChain({ ppid: 1, platform: "linux", exec: ok }), [1]);
+  // 실제 ps: 이 프로세스의 부모부터 시작하는 사슬
+  if (process.platform !== "win32") {
+    const real = hostPidChain();
+    assert.equal(real[0], process.ppid);
+    // 테스트 프로세스의 부모(테스트 러너)도 부모가 있다 — 1 이면 ps 해석이 조용히 깨진 것이다
+    assert.ok(real.length >= 2 && real.length <= HOST_PID_DEPTH, `${real}`);
+  }
+});
+
+test("runStopHook sends the parent chain from hostPidChain by default", async () => {
+  const seen = [];
+  const connect = async () => ({
+    request: async (_type, payload) => {
+      seen.push(payload);
+      return { channelCode: null, incoming: [], results: [], stalled: [] };
+    },
+    close() {},
+  });
+  await runStopHook({
+    agent: "codex",
+    input: JSON.stringify({ cwd: "/repo" }),
+    connect,
+  });
+  assert.equal(seen[0].hostPid, process.ppid);
+  assert.ok(Array.isArray(seen[0].hostPids));
+  assert.equal(seen[0].hostPids[0], process.ppid);
+});
+
+test("runStopHook computes the parent chain before it starts connecting (ps never eats the deadline)", async () => {
+  const order = [];
+  await runStopHook({
+    agent: "codex",
+    input: JSON.stringify({ cwd: "/repo" }),
+    hostPids: () => {
+      order.push("hostPids");
+      return [process.ppid];
+    },
+    connect: async () => {
+      order.push("connect");
+      return {
+        request: async (_type, payload) => {
+          order.push("request");
+          assert.deepEqual(payload.hostPids, [process.ppid]);
+          return { channelCode: null, incoming: [], results: [], stalled: [] };
+        },
+        close() {},
+      };
+    },
+  });
+  assert.deepEqual(order, ["hostPids", "connect", "request"]);
 });

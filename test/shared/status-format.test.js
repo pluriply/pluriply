@@ -595,6 +595,27 @@ test("problems section lists the last 24h of task and hub events with the log fi
     summarizeEvents([null, 42, { kind: "unclaimed", detail: "x" }]),
     "unclaimed — x",
   );
+  // Plan 6d: 무시된 태스크는 `ignored, then to-worker`, 고정 태스크면 `ignored — delivered to …`
+  assert.equal(
+    summarizeEvents([
+      {
+        kind: "ignored",
+        detail: "delivered to codex#k9cw but its turn ended without a result",
+        by: "codex#k9cw",
+      },
+      { kind: "to-worker", detail: "handed to a codex worker (spawned)" },
+    ]),
+    "ignored, then to-worker",
+  );
+  assert.equal(
+    summarizeEvents([
+      {
+        kind: "ignored",
+        detail: "delivered to codex#k9cw but its turn ended without a result",
+      },
+    ]),
+    "ignored — delivered to codex#k9cw but its turn ended without a result",
+  );
   // 요청은 40자에서 자른다
   const long = buildStatus({
     ping: PING,
@@ -817,4 +838,57 @@ test("hub running line version is sanitized and a missing tool keeps the old ren
   assert.match(lines[0], /version 0\.8\.0 X,/);
   assert.doesNotMatch(lines.join("\n"), /\x1b/);
   assert.equal(restartHint({ cwd: "/x" }), "quit and reopen undefined");
+});
+
+test("an ignored task later handed to a worker renders as one problems line", () => {
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [],
+      problems: {
+        tasks: [
+          {
+            channelCode: "plp-aaaa-bbbb",
+            taskId: "task_1g9d",
+            from: "claude-code#s",
+            to: "codex",
+            request: "port the parser",
+            status: "completed",
+            events: [
+              {
+                at: AT(10, 1),
+                kind: "ignored",
+                detail:
+                  "delivered to codex#k9cw but its turn ended without a result",
+                by: "codex#k9cw",
+              },
+              {
+                at: AT(10, 2),
+                kind: "to-worker",
+                detail:
+                  "no live session picked it up within 180s; handed to a codex worker (spawned)",
+              },
+            ],
+            at: AT(10, 2),
+          },
+        ],
+        events: [],
+      },
+    },
+    error: null,
+    fingerprint: disk(SAME).fn,
+    logFile: "/Users/me/.pluriply/logs/hub.log",
+  });
+  assert.deepEqual(
+    st.problems.tasks[0].events.map((e) => e.kind),
+    ["ignored", "to-worker"],
+  );
+  const lines = formatStatus(st, { home: "/Users/me", now: NOW });
+  const i = lines.indexOf("problems (last 24h)");
+  assert.ok(i > 0);
+  assert.deepEqual(lines.slice(i + 1), [
+    '  10:02  task task_1g9d  → codex   ignored, then to-worker   "port the parser"',
+    "  logs: ~/.pluriply/logs/hub.log",
+  ]);
 });

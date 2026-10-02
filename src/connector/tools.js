@@ -592,7 +592,8 @@ export function registerTools(
         "pinned = the task is fixed to that instance (no worker will be spawned); targetOnline tells whether it is connected right now. " +
         "Always pass cwd as the folder the work should happen in. " +
         "If targetJoined is false the target has not joined yet. Agent names are case-sensitive. " +
-        "The task's events (see get_task_result) record wake-failed or unclaimed when the target session did not receive it, and to-worker when a worker took it over.",
+        "The task's events (see get_task_result) record wake-failed or unclaimed when the target session did not receive it, " +
+        "ignored when a session received it but ended its turn without a result, and to-worker when a worker took it over.",
       inputSchema: {
         to: z
           .string()
@@ -911,7 +912,9 @@ export function registerTools(
       annotations: annotations({ readOnlyHint: true, idempotentHint: true }),
       description:
         "Fetch a task by id, including its status and result once completed. " +
-        "If its events include wake-failed or unclaimed, the target session did not receive it: look for a to-worker event (a worker took it over); " +
+        "If its events include wake-failed or unclaimed, the target session did not receive it; " +
+        "if they include ignored, the target session received it but ended its turn without a result. " +
+        "Either way look for a to-worker event (a worker took it over); " +
         "otherwise resend it to another target or as a worker task (mode: spawn).",
       inputSchema: { task_id: z.string() },
     },
