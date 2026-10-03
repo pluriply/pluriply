@@ -4,7 +4,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { codeFingerprint, installRoot } from "../../src/shared/fingerprint.js";
+import {
+  codeFingerprint,
+  installRoot,
+  restartLevel,
+} from "../../src/shared/fingerprint.js";
 
 /** 가짜 설치 루트: package.json 과 세 부품 폴더 */
 function fakeRoot() {
@@ -93,6 +97,38 @@ test("missing root, missing part folder or unknown part gives null", () => {
   assert.equal(codeFingerprint(null, "hub"), null);
 });
 
+test("restartLevel passes only non-negative integers", () => {
+  assert.equal(restartLevel(0), 0);
+  assert.equal(restartLevel(7), 7);
+  for (const bad of [-1, 1.5, "2", null, undefined, true, NaN, 2 ** 53, [1]])
+    assert.equal(restartLevel(bad), null, String(bad));
+});
+
+test("restart is package.json's pluriply.connectorRestart, the same for both parts, and null when missing or odd", () => {
+  const root = fakeRoot();
+  const setPkg = (pkg) =>
+    writeFileSync(join(root, "package.json"), JSON.stringify(pkg));
+  // 필드 없음(옛 설치본)
+  assert.equal(codeFingerprint(root, "connector").restart, null);
+  const before = codeFingerprint(root, "connector").fingerprint;
+  setPkg({ version: "1.2.3", pluriply: { connectorRestart: 3 } });
+  const conn = codeFingerprint(root, "connector");
+  assert.equal(conn.restart, 3);
+  assert.equal(codeFingerprint(root, "hub").restart, 3);
+  // 번호는 지문에 들어가지 않는다(지문 = 다른 코드, 번호 = 재시작 필요)
+  assert.equal(conn.fingerprint, before);
+  setPkg({ version: "1.2.3", pluriply: { connectorRestart: 0 } });
+  assert.equal(codeFingerprint(root, "connector").restart, 0);
+  for (const bad of [-1, 1.5, "2", null, true]) {
+    setPkg({ version: "1.2.3", pluriply: { connectorRestart: bad } });
+    assert.equal(codeFingerprint(root, "connector").restart, null, String(bad));
+  }
+  for (const odd of ["x", null, 5, []]) {
+    setPkg({ version: "1.2.3", pluriply: odd });
+    assert.equal(codeFingerprint(root, "connector").restart, null);
+  }
+});
+
 test("installRoot is the package folder of this checkout", () => {
   const expected = fileURLToPath(new URL("../..", import.meta.url)).replace(
     /[\\/]$/,
@@ -102,5 +138,9 @@ test("installRoot is the package folder of this checkout", () => {
   assert.match(
     codeFingerprint(installRoot(), "connector").fingerprint,
     /^[0-9a-f]{12}$/,
+  );
+  // Plan 6e: 이 패키지는 재시작 번호를 싣는다(개발 체크아웃·공개 미러 모두 package.json 에 있다)
+  assert.ok(
+    Number.isInteger(codeFingerprint(installRoot(), "connector").restart),
   );
 });

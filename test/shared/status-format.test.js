@@ -398,6 +398,9 @@ test("json shape", () => {
   // Plan 6c §5.2
   for (const k of ["wakeState", "wakeReason", "wakeAt", "fix"])
     assert.ok(k in round.sessions[0], k);
+  // Plan 6e §5: optional(재시작이 선택일 때의 방법)도 늘 있는 키다
+  assert.ok("optional" in round.sessions[0]);
+  assert.equal(round.sessions[0].optional, null);
   assert.deepEqual(round.problems, { tasks: [], events: [] });
   assert.equal(round.logFile, null);
   const withLog = buildStatus({
@@ -891,4 +894,221 @@ test("an ignored task later handed to a worker renders as one problems line", ()
     '  10:02  task task_1g9d  → codex   ignored, then to-worker   "port the parser"',
     "  logs: ~/.pluriply/logs/hub.log",
   ]);
+});
+
+// ── Plan 6e: 재시작 번호 ─────────────────────────────────────────────────────
+/** 설치 루트마다 다른 디스크 상태(지문 cccccccccccc 가 세션의 코드다) */
+const LEVELS = {
+  ...SAME,
+  "/same|connector": {
+    version: "0.11.0",
+    fingerprint: "cccccccccccc",
+    restart: 1,
+  },
+  "/code|connector": {
+    version: "0.11.0",
+    fingerprint: "dddddddddddd",
+    restart: 1,
+  },
+  "/up|connector": {
+    version: "0.11.0",
+    fingerprint: "cccccccccccc",
+    restart: 2,
+  },
+  "/down|connector": {
+    version: "0.11.0",
+    fingerprint: "dddddddddddd",
+    restart: 0,
+  },
+  "/nolevel|connector": { version: "0.11.0", fingerprint: "dddddddddddd" },
+  "/nolevel-same|connector": {
+    version: "0.11.0",
+    fingerprint: "cccccccccccc",
+  },
+};
+/** 번호 1, 버전 0.11.0 으로 뜬 세션 */
+const lv = (instanceId, root, o = {}) =>
+  sess({ instanceId, root, version: "0.11.0", restart: 1, ...o });
+
+test("restart numbers decide a session's state; an unknown number on either side falls back to the fingerprint rule", () => {
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [
+        lv("codex#same", "/same"),
+        lv("codex#code", "/code"),
+        lv("codex#up", "/up"), // 번호만 올랐다(지문은 같다)
+        lv("codex#down", "/down"), // 번호가 내려갔다(브랜치 전환)
+        lv("codex#zero", "/down", { restart: 0 }), // 0 도 번호다
+        lv("codex#old-conn", "/code", { restart: null }), // 번호를 모르는 옛 커넥터
+        lv("codex#old-hub", "/code", { restart: undefined }), // 옛 허브는 필드를 주지 않는다
+        lv("codex#old-inst", "/nolevel"), // 디스크에 번호가 없다
+        lv("codex#old-inst-same", "/nolevel-same"),
+        lv("codex#odd", "/code", { restart: "1" }), // 이상한 값은 모르는 것
+        lv("codex#gone", "/gone"), // 디스크를 못 읽는다
+        lv("codex#nofp", "/code", { fingerprint: null }),
+      ],
+    },
+    error: null,
+    fingerprint: disk(LEVELS).fn,
+  });
+  const by = Object.fromEntries(st.sessions.map((s) => [s.instanceId, s]));
+  const states = Object.fromEntries(
+    st.sessions.map((s) => [s.instanceId, s.state]),
+  );
+  assert.deepEqual(states, {
+    "codex#same": "ok",
+    "codex#code": "optional",
+    "codex#up": "restart",
+    "codex#down": "restart",
+    "codex#zero": "optional",
+    "codex#old-conn": "restart",
+    "codex#old-hub": "restart",
+    "codex#old-inst": "restart",
+    "codex#old-inst-same": "ok",
+    "codex#odd": "restart",
+    "codex#gone": "unknown",
+    "codex#nofp": "unknown",
+  });
+  // optional 은 restart 안내 대신 optional 안내를 갖는다(같은 글)
+  assert.equal(by["codex#code"].restart, null);
+  assert.equal(by["codex#code"].optional, restartHint(lv("x", "/code")));
+  assert.equal(by["codex#up"].optional, null);
+  assert.equal(by["codex#up"].restart, restartHint(lv("x", "/up")));
+  // 허브가 준 번호가 restart(안내 글) 자리에 새지 않는다
+  assert.equal(by["codex#same"].restart, null);
+  assert.equal(by["codex#same"].optional, null);
+  assert.equal(by["codex#gone"].restart, null);
+  assert.equal(by["codex#gone"].optional, null);
+  assert.equal(by["codex#same"].onDisk.restart, 1);
+});
+
+test("an optional session shows ~, '(restart optional)', an optional: line and is counted apart; it sorts after restart and unknown", () => {
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [
+        lv("codex#ok", "/same", { cwd: "/w/ok" }),
+        lv("claude-code#opt", "/code", {
+          tool: "claude-code",
+          cwd: "/w/opt",
+          version: "0.10.0",
+          threadId: "t-1",
+        }),
+        lv("codex#opt2", "/code", { cwd: "/w/opt2" }),
+        lv("codex#gone", "/gone", { cwd: "/w/gone" }),
+        lv("codex#up", "/up", { cwd: "/w/up" }),
+      ],
+    },
+    error: null,
+    fingerprint: disk(LEVELS).fn,
+  });
+  assert.deepEqual(
+    st.sessions.map((s) => s.instanceId),
+    ["codex#up", "codex#gone", "claude-code#opt", "codex#opt2", "codex#ok"],
+  );
+  const lines = formatStatus(st, { home: "/Users/me", now: NOW });
+  assert.equal(
+    lines[2],
+    "sessions 5 connected, 1 need a restart, 2 can pick up newer code   (workers: 0 running)",
+  );
+  const text = lines.join("\n");
+  // 버전이 다르면 버전만, 같으면 지문까지 — restart 와 같은 모양에 (restart optional) 이 붙는다
+  assert.match(
+    text,
+    /~ claude-code {2}\/w\/opt .* code 0\.10\.0 → 0\.11\.0 on disk \(restart optional\)\n {6}optional: \/exit, then {2}cd \/w\/opt && claude --resume t-1$/m,
+  );
+  assert.match(
+    text,
+    /~ codex {8}\/w\/opt2 .* code 0\.11\.0 \(cccccccccccc\) → 0\.11\.0 \(dddddddddddd\) on disk \(restart optional\)\n {6}optional: exit and start codex again in \/w\/opt2$/m,
+  );
+  assert.match(
+    text,
+    /✗ codex {8}\/w\/up .* on disk\n {6}restart: exit and start codex again in \/w\/up$/m,
+  );
+  assert.doesNotMatch(text, /✗.*restart optional/);
+  assert.match(text, /\? codex {8}\/w\/gone /);
+  assert.match(text, /✓ codex {8}\/w\/ok .* code 0\.11\.0$/m);
+});
+
+test("the summary line keeps its old shape when no session is optional", () => {
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [lv("codex#ok", "/same"), lv("codex#up", "/up")],
+    },
+    error: null,
+    fingerprint: disk(LEVELS).fn,
+  });
+  assert.equal(
+    formatStatus(st, { home: "/Users/me", now: NOW })[2],
+    "sessions 2 connected, 1 need a restart   (workers: 0 running)",
+  );
+});
+
+test("a failed wake outranks ~: the mark is ! and only the fix line shows; wake off keeps ~", () => {
+  const st = buildStatus({
+    ping: PING,
+    sessions: {
+      hub: HUB,
+      sessions: [
+        lv("codex#optfail", "/code", {
+          cwd: "/w/f",
+          wake: true,
+          threadId: "t-f",
+          wakeState: "failed",
+          wakeReason: "codex queue timed out",
+          wakeAt: AT(9, 31),
+        }),
+        lv("codex#optoff", "/code", {
+          cwd: "/w/o",
+          wakeState: "off",
+          wakeReason: "not started with pluriply codex",
+          wakeAt: AT(8, 2),
+        }),
+        lv("codex#okfail", "/same", {
+          cwd: "/w/k",
+          wake: true,
+          threadId: "t-k",
+          wakeState: "failed",
+          wakeReason: "app server gone",
+          wakeAt: AT(9, 40),
+        }),
+      ],
+    },
+    error: null,
+    fingerprint: disk(LEVELS).fn,
+  });
+  const by = Object.fromEntries(st.sessions.map((s) => [s.instanceId, s]));
+  // --json 에는 둘 다 있다
+  assert.equal(by["codex#optfail"].state, "optional");
+  assert.equal(
+    by["codex#optfail"].optional,
+    "exit, then  cd /w/f && pluriply codex resume t-f",
+  );
+  assert.equal(by["codex#optfail"].fix, by["codex#optfail"].optional);
+  // 정렬: optional(깨우기 실패 먼저) → ok
+  assert.deepEqual(
+    st.sessions.map((s) => s.instanceId),
+    ["codex#optfail", "codex#optoff", "codex#okfail"],
+  );
+  const lines = formatStatus(st, { home: "/Users/me", now: NOW });
+  const text = lines.join("\n");
+  assert.equal(
+    lines[2],
+    "sessions 3 connected, 0 need a restart, 2 can pick up newer code   (workers: 0 running)",
+  );
+  assert.match(
+    text,
+    /! codex {8}\/w\/f .* on disk \(restart optional\) {3}wake failed 09:31: codex queue timed out\n {6}fix: exit, then {2}cd \/w\/f && pluriply codex resume t-f\n {2}~ codex/,
+  );
+  assert.equal(lines.filter((l) => l.includes("optional: ")).length, 1);
+  assert.match(
+    text,
+    /~ codex {8}\/w\/o .* on disk \(restart optional\) {3}wake off \(not started with pluriply codex\)\n {6}optional: exit and start codex again in \/w\/o$/m,
+  );
+  assert.match(text, /! codex {8}\/w\/k .* code 0\.11\.0 {3}wake failed 09:40/);
 });

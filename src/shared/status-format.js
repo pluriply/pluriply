@@ -1,15 +1,17 @@
 // Plan 6a(스펙 §6): `pluriply status` 의 판정·출력. 디스크 지문은 주입한 함수로만 읽는다(테스트 가능).
 // Plan 6c(스펙 §5): 세션의 깨우기 상태(wake on/off/failed)와 최근 24시간의 문제(problems)를 보여 준다 —
 // 문제가 없으면 출력은 6a 와 같다.
-import { codeFingerprint } from "./fingerprint.js";
+// Plan 6e(스펙 §4·§5): 세션은 재시작 번호로 판정한다 — 번호가 다르면 restart(✗), 번호가 같고 지문만 다르면
+// optional(~, 재시작은 선택), 한쪽이라도 번호를 모르면 지문 규칙 그대로. 허브는 지문만 본다.
+import { codeFingerprint, restartLevel } from "./fingerprint.js";
 
 const APP = {
   antigravity: "Antigravity",
   "antigravity-ide": "Antigravity",
   "claude-desktop": "Claude Desktop",
 };
-const MARK = { restart: "✗", unknown: "?", ok: "✓" };
-const ORDER = { restart: 0, unknown: 1, ok: 2 };
+const MARK = { restart: "✗", unknown: "?", optional: "~", ok: "✓" };
+const ORDER = { restart: 0, unknown: 1, optional: 2, ok: 3 };
 /** problems 의 요청 앞 글자 수와 사건 설명 글자 수 */
 const REQUEST_CHARS = 40;
 const DETAIL_CHARS = 70;
@@ -174,15 +176,25 @@ export function buildStatus({
     .filter((s) => !s.worker)
     .map((s) => {
       const disk = s.fingerprint ? onDisk(s.root, "connector") : null;
+      // Plan 6e §4: 세션과 디스크의 재시작 번호를 둘 다 알 때만 번호로 판정한다
+      const level = restartLevel(s.restart);
+      const diskLevel = restartLevel(disk?.restart);
+      const sameCode = disk ? disk.fingerprint === s.fingerprint : false;
       const state = !s.fingerprint
         ? s.version
           ? "unknown" // 지문 계산에는 실패했지만 버전은 아는 새 커넥터
           : "restart" // 버전·지문 둘 다 없는 옛 커넥터
         : !disk
           ? "unknown"
-          : disk.fingerprint === s.fingerprint
-            ? "ok"
-            : "restart";
+          : level !== null && diskLevel !== null
+            ? level !== diskLevel
+              ? "restart" // 번호가 다르다(내려간 경우도) — 지문과 무관하게 재시작
+              : sameCode
+                ? "ok"
+                : "optional" // 번호는 같고 코드만 다르다 — 재시작은 선택
+            : sameCode
+              ? "ok"
+              : "restart";
       const wakeState = s.wakeState ?? null;
       return {
         ...s,
@@ -191,7 +203,10 @@ export function buildStatus({
         wakeAt: s.wakeAt ?? null,
         onDisk: disk,
         state,
+        // 허브가 준 s.restart(번호)는 여기서 안내 글로 덮인다 — status 의 restart 는 6a 부터 "재시작 방법"이다
         restart: state === "restart" ? restartHint(s) : null,
+        // Plan 6e: 재시작이 선택일 때의 방법(같은 글) — 새 코드를 쓰고 싶을 때만 따른다
+        optional: state === "optional" ? restartHint(s) : null,
         // Plan 6c: 깨우기가 멈춘 세션은 `pluriply codex` 로 다시 여는 것이 고치는 방법이다(D6). 옛 코드
         // 표시가 우선한다 — 그 재시작 안내가 이미 같은 말을 한다.
         fix:
@@ -217,15 +232,20 @@ export function buildStatus({
   };
 }
 
-/** 정렬 순위: 재시작 필요 → 모름 → (같은 상태 안에서) 깨우기 실패 먼저 */
+/** 정렬 순위: 재시작 필요 → 모름 → 재시작 선택 → 정상, (같은 상태 안에서) 깨우기 실패 먼저 */
 function rank(s) {
   return ORDER[s.state] * 2 + (s.wakeState === "failed" ? 0 : 1);
 }
 
-/** 세션 줄의 표시: 옛 코드 표시가 우선, 그다음 깨우기 실패 `!`, 깨우기 꺼짐 `·` @param {object} s */
+/**
+ * 세션 줄의 표시: 옛 코드 표시(✗·?)가 우선, 그다음 깨우기 실패 `!`, 재시작 선택 `~`, 깨우기 꺼짐 `·`.
+ * `~` 는 무시해도 되는 표시라 고쳐야 하는 `!` 를 가리지 않는다(Plan 6e).
+ * @param {object} s
+ */
 function markOf(s) {
-  if (s.state !== "ok") return MARK[s.state];
+  if (s.state === "restart" || s.state === "unknown") return MARK[s.state];
   if (s.wakeState === "failed") return "!";
+  if (s.state === "optional") return MARK.optional;
   if (s.wakeState === "off") return "·";
   return MARK.ok;
 }
@@ -275,8 +295,10 @@ export function formatStatus(st, { home, now = new Date() } = {}) {
     return lines;
   }
   const need = st.sessions.filter((s) => s.state === "restart").length;
+  // Plan 6e §5: 재시작이 선택인 세션 수 — 0 이면 6a 의 줄 모양 그대로
+  const can = st.sessions.filter((s) => s.state === "optional").length;
   lines.push(
-    `sessions ${st.sessions.length} connected, ${need} need a restart   (workers: ${st.workers} running)`,
+    `sessions ${st.sessions.length} connected, ${need} need a restart${can > 0 ? `, ${can} can pick up newer code` : ""}   (workers: ${st.workers} running)`,
   );
   for (const s of st.sessions) {
     const ver = clean(s.version ?? "?");
@@ -294,16 +316,20 @@ export function formatStatus(st, { home, now = new Date() } = {}) {
           ? s.version
             ? `${ver} (fingerprint unavailable)`
             : "unknown (older connector)"
-          : s.state === "restart"
-            ? sameVersion
-              ? `${code(s.version, s.fingerprint)} → ${code(s.onDisk.version, s.onDisk.fingerprint)} on disk`
-              : `${ver} → ${diskVer ?? "?"} on disk`
+          : s.state === "restart" || s.state === "optional"
+            ? `${
+                sameVersion
+                  ? `${code(s.version, s.fingerprint)} → ${code(s.onDisk.version, s.onDisk.fingerprint)} on disk`
+                  : `${ver} → ${diskVer ?? "?"} on disk`
+              }${s.state === "optional" ? " (restart optional)" : ""}`
             : `${ver} (can't read the install)`;
     lines.push(
       `  ${markOf(s)} ${clean(String(s.tool)).padEnd(12)} ${shortPath(cut(s.cwd) || null, home).padEnd(24)} since ${formatWhen(s.startedAt ?? s.connectedAt, now).padEnd(11)} code ${codeText}${wakeText(s, now)}`,
     );
     if (s.restart) lines.push(`      restart: ${s.restart}`);
+    // 깨우기 실패의 fix 도 세션을 다시 여는 것이라 새 코드까지 불러온다 — optional 줄을 겹쳐 내지 않는다
     else if (s.fix) lines.push(`      fix: ${s.fix}`);
+    else if (s.optional) lines.push(`      optional: ${s.optional}`);
   }
   // Plan 6c §5.1: 최근 24시간의 문제 — 있을 때만 절이 생긴다
   const { tasks, events } = st.problems ?? { tasks: [], events: [] };

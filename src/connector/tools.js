@@ -19,6 +19,8 @@ const START_CODE = codeFingerprint(CODE_ROOT, "connector");
 export const CONNECTOR_CODE = {
   version: START_CODE?.version ?? PACKAGE_VERSION,
   fingerprint: START_CODE?.fingerprint ?? null,
+  // Plan 6e: 기동 때의 재시작 번호 — 디스크의 번호와 다를 때만 재시작이 필요하다
+  restart: START_CODE?.restart ?? null,
   root: CODE_ROOT,
   startedAt: new Date().toISOString(),
 };
@@ -123,6 +125,8 @@ export async function hello(
       // Plan 6a: 이 커넥터의 코드 — status 가 옛 코드로 도는 세션을 가린다
       version: CONNECTOR_CODE.version,
       fingerprint: CONNECTOR_CODE.fingerprint ?? undefined,
+      // Plan 6e: 재시작 번호(모르면 싣지 않는다 — 허브·status 는 지문 규칙으로 판정한다)
+      restart: CONNECTOR_CODE.restart ?? undefined,
       root: CONNECTOR_CODE.root,
       startedAt: CONNECTOR_CODE.startedAt,
       wake: codexWakeEnabled({ agent, env: process.env, stale: hub.stale }),
