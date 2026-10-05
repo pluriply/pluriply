@@ -9,6 +9,8 @@ const agent = process.env.PLURIPLY_WORKER_AGENT ?? "codex";
 // test/hub/workers.test.js가 워커 명령에 프롬프트를 마지막 인자로 넣어준다.
 console.log(process.argv.slice(2).join(" "));
 console.log(`cwd=${process.cwd()}`);
+// Plan 6f: 허브가 넘긴 채널 코드(워커 커넥터의 자동 참여용)
+console.log(`PLURIPLY_WORKER_CHANNEL=${process.env.PLURIPLY_WORKER_CHANNEL}`);
 
 if (process.env.PLURIPLY_FAKE_IGNORE_SIGTERM === "1") {
   process.on("SIGTERM", () => {});
@@ -43,20 +45,22 @@ if (behavior === "hang") {
     console.log("about to die");
     process.exit(3);
   }
-if (behavior === "review") {
-  await hub.request("task.complete", {
-    channelCode,
-    taskId,
-    status: "completed",
-    review: {
-      verdict: "approve",
-      findings: [{ severity: "minor", file: "a.js", line: 1, message: "nit" }],
-      summary: `reviewed by fake ${agent}`,
-    },
-  });
-  hub.close();
-  process.exit(0);
-}
+  if (behavior === "review") {
+    await hub.request("task.complete", {
+      channelCode,
+      taskId,
+      status: "completed",
+      review: {
+        verdict: "approve",
+        findings: [
+          { severity: "minor", file: "a.js", line: 1, message: "nit" },
+        ],
+        summary: `reviewed by fake ${agent}`,
+      },
+    });
+    hub.close();
+    process.exit(0);
+  }
   await hub.request("task.complete", {
     channelCode,
     taskId,

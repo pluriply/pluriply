@@ -364,13 +364,38 @@ export function registerTools(
   }
 
   /**
+   * 채널에 참여하고 상태에 반영한다(join_channel 도구와 워커 자동 참여 공용).
+   * @param {string} code @returns {Promise<object[]>} peers
+   */
+  async function joinChannel(code) {
+    const { peers } = await hubRequest("channel.join", { channelCode: code });
+    state.currentChannel = code;
+    return peers;
+  }
+
+  /** Plan 6f D1: 허브가 워커에 넘긴 채널 코드. 대화형 커넥터는 환경 변수가 있어도 쓰지 않는다. */
+  const workerChannel = worker
+    ? process.env.PLURIPLY_WORKER_CHANNEL || null
+    : null;
+
+  /**
    * 채널 가드. 핸들러는 순수 데이터를 반환하고 여기서 MCP 결과로 포장한다.
-   * 채널이 없으면 복귀를 시도하고, 복귀한 그 응답에만 resumedChannel을 붙인다.
+   * 채널이 없으면 워커는 허브가 넘긴 채널로 참여하고(Plan 6f — resumedChannel 을 붙이지 않는다),
+   * 그 밖에는 복귀를 시도하고 복귀한 그 응답에만 resumedChannel을 붙인다.
    */
   const needChannel = (fn) => async (args, extra) => {
     if (hub.stale) return fail(staleHubMessage(hub.stale));
     let resumed = null;
-    if (!state.currentChannel) {
+    if (!state.currentChannel && workerChannel) {
+      try {
+        await joinChannel(workerChannel);
+      } catch (err) {
+        if (err instanceof IdentityLostError) return fail(err.message);
+        return fail(
+          `Join a channel first with join_channel. (auto-join failed: ${err.message})`,
+        );
+      }
+    } else if (!state.currentChannel) {
       try {
         resumed = await resumeChannel();
       } catch (err) {
@@ -503,10 +528,7 @@ export function registerTools(
       try {
         const code =
           channel_code ?? (await hubRequest("channel.create")).channelCode;
-        const { peers } = await hubRequest("channel.join", {
-          channelCode: code,
-        });
-        state.currentChannel = code;
+        const peers = await joinChannel(code);
         return ok({ channelCode: code, peers, me: state.instanceId });
       } catch (err) {
         return fail(err.message);
