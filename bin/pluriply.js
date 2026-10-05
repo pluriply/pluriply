@@ -146,7 +146,14 @@ if (cmd === "hub" && sub === "start") {
     for (const a of TEMPLATE_AGENTS) {
       const enabled = Boolean(cfg.workers[a]?.enabled);
       const suffix = enabled && running ? ` (${running} running)` : "";
-      console.log(`${a}: ${enabled ? "enabled" : "disabled"}${suffix}`);
+      // agy 워커는 기본으로 --sandbox(셸 불가) — 끈 경우만 표시한다
+      const sandboxOff =
+        enabled && a === "antigravity" && cfg.workers[a]?.sandbox === false
+          ? " (sandbox off)"
+          : "";
+      console.log(
+        `${a}: ${enabled ? "enabled" : "disabled"}${sandboxOff}${suffix}`,
+      );
     }
   } else if ((sub === "enable" || sub === "disable") && agent) {
     if (!TEMPLATE_AGENTS.includes(agent)) {
@@ -156,6 +163,11 @@ if (cmd === "hub" && sub === "start") {
     setWorkerEnabled(home, [agent], sub === "enable");
     if (sub === "enable") registerMcpServer(agent, { binPath: BIN_PATH });
     console.log(`worker ${agent} ${sub}d`);
+    if (sub === "enable" && agent === "antigravity")
+      console.log(
+        "antigravity workers run with --sandbox: no shell commands (file edits outside the task folder are not blocked). " +
+          `To allow shell commands, set "sandbox": false under workers.antigravity in ${join(home, "config.json")}.`,
+      );
   } else {
     console.error(
       "usage: pluriply worker <enable|disable> <agent> | worker list",
