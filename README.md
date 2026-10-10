@@ -6,6 +6,8 @@ other, ask questions, and cross-review results — all on your machine.
 
 Pluriply is a trademark of TQSoft.
 
+한국어 시작 가이드: [docs/ko/quickstart.md](https://github.com/pluriply/pluriply/blob/main/docs/ko/quickstart.md)
+
 ## Supported tools
 
 | Tool                    | Role                              |

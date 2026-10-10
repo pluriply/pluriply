@@ -1,0 +1,43 @@
+name: Feedback / 사용 후기
+description: Tried pluriply? Tell us how it went (Korean or English is fine) / 써 보신 소감을 남겨 주세요 (한국어·영어 모두 좋아요)
+labels: [feedback]
+body:
+  - type: checkboxes
+    id: clients
+    attributes:
+      label: Tools you connected / 연결한 도구
+      options:
+        - label: Claude Code
+        - label: Codex
+        - label: Antigravity CLI
+        - label: Antigravity IDE
+        - label: Claude Desktop
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you try? / 무엇을 맡겨 보셨나요?
+      placeholder: e.g. asked Codex from Claude Code to fix a failing test / 예) Claude Code 에서 Codex 에게 실패하는 테스트 수정을 맡김
+    validations:
+      required: true
+  - type: textarea
+    id: good
+    attributes:
+      label: What worked well? / 잘된 점
+  - type: textarea
+    id: stuck
+    attributes:
+      label: Where did you get stuck? / 막힌 곳·답답했던 점
+  - type: dropdown
+    id: again
+    attributes:
+      label: Would you keep using it? / 계속 쓰실 것 같나요?
+      options:
+        - Yes / 네
+        - Maybe / 아마도
+        - No / 아니요
+  - type: input
+    id: env
+    attributes:
+      label: Environment / 환경
+      description: pluriply version, OS, Node version / pluriply 버전, OS, Node 버전
+      placeholder: 0.13.1 / macOS 15.1 / Node 22.11
