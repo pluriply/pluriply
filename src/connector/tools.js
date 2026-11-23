@@ -9,6 +9,8 @@ import {
 import { codeFingerprint, installRoot } from "../shared/fingerprint.js";
 import { PACKAGE_VERSION } from "../shared/version.js";
 import { makeVersionCheck } from "./version-check.js";
+import { pluriplyHome } from "../shared/paths.js";
+import { hasHint, markHint } from "../shared/hints.js";
 
 const CODE_ROOT = installRoot();
 const START_CODE = codeFingerprint(CODE_ROOT, "connector");
@@ -24,6 +26,16 @@ export const CONNECTOR_CODE = {
   root: CODE_ROOT,
   startedAt: new Date().toISOString(),
 };
+
+/** 첫 위임 성공 결과 끝에 한 번 붙는 안내 — 화면(view)을 알린다(view 설계 §6.5) */
+export const VIEW_TIP =
+  "The user can watch this and past tasks in the Pluriply view: run `npx pluriply view`, or ask you to open it (open_view). Mention this once.";
+/** 첫 위임 권유가 붙는 도구 */
+const VIEW_TIP_TOOLS = new Set(["send_task", "ask_agent", "request_review"]);
+
+/** 기본 ensure — view 서버 코드를 커넥터 기동 때 읽지 않도록 처음 쓸 때 불러온다 */
+const defaultEnsure = async (opts) =>
+  (await import("../shared/view-launch.js")).ensureView(opts);
 
 /** @param {object} data @returns {object} MCP 텍스트 결과 */
 function ok(data) {
@@ -156,6 +168,8 @@ export function registerTools(
     wakeChunkMs,
     versionCheck,
     log = (line) => process.stderr.write(line),
+    home = hub.home ?? pluriplyHome(),
+    ensure = defaultEnsure,
   },
 ) {
   /** instanceId 는 재접속 hello 가 돌려준 값으로 갱신된다(구버전 허브로 시작해 null 이었던 경우). */
@@ -196,6 +210,24 @@ export function registerTools(
         hubInfo: () => hub.hubInfo ?? null,
       }));
   /**
+   * 첫 위임이 성공했고 아직 화면 안내를 못 봤으면 결과 끝에 VIEW_TIP 을 붙이고 기록한다.
+   * 힌트 읽기·쓰기 실패는 결과에 영향이 없다.
+   */
+  const withViewTip = (result) => {
+    if (worker || result?.isError === true || !Array.isArray(result?.content))
+      return result;
+    try {
+      if (hasHint(home, "view")) return result;
+      markHint(home, "view");
+    } catch {
+      return result;
+    }
+    return {
+      ...result,
+      content: [...result.content, { type: "text", text: `\n${VIEW_TIP}` }],
+    };
+  };
+  /**
    * 도구를 등록하되, 호출마다 Codex 가 _meta 에 싣는 스레드 ID 를 기록하고, 결과 끝에
    * 옛 코드 경고를 덧붙인다(Plan 6a §7). 첫 항목(JSON)은 건드리지 않는다 — 결과를 파싱하는
    * 쪽이 영향을 받지 않게 한다.
@@ -204,7 +236,8 @@ export function registerTools(
     server.registerTool(name, def, async (...a) => {
       const tid = threadIdFromExtra(a[a.length - 1]);
       if (tid) state.threadId = tid;
-      const result = await handler(...a);
+      let result = await handler(...a);
+      if (VIEW_TIP_TOOLS.has(name)) result = withViewTip(result);
       let lines = [];
       try {
         lines = codeWarnings();
@@ -1052,6 +1085,35 @@ export function registerTools(
         artifacts,
       }),
     ),
+  );
+
+  register(
+    "open_view",
+    {
+      annotations: annotations({ openWorldHint: true }),
+      description:
+        "Open the Pluriply view (connected tools, channels, task requests and results) in the user's browser. Use when the user asks to see Pluriply on screen.",
+      inputSchema: {},
+    },
+    async () => {
+      if (worker) return fail("open_view is not available to workers");
+      try {
+        const info = await ensure({ home, open: true });
+        const result = ok({
+          url: info.url,
+          opened: info.opened,
+          reused: info.reused,
+        });
+        if (info.opened === false)
+          result.content.push({
+            type: "text",
+            text: `\nThe browser did not open; give the user this address: ${info.url}`,
+          });
+        return result;
+      } catch (err) {
+        return fail(`could not open the Pluriply view: ${err.message}`);
+      }
+    },
   );
 
   register(

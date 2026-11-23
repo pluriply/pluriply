@@ -18,6 +18,7 @@ import { connectIfLive } from "../src/connector/hub-client.js";
 import { isValidAgentName } from "../src/shared/identity.js";
 import { registerMcpServer } from "../src/shared/mcp-register.js";
 import { buildStatus, formatStatus } from "../src/shared/status-format.js";
+import { VIEW_HINT_LINE } from "../src/shared/hints.js";
 
 const BIN_PATH = fileURLToPath(import.meta.url);
 
@@ -250,6 +251,7 @@ if (cmd === "hub" && sub === "start") {
     console.log(json ? JSON.stringify(obj, null, 2) : text);
   if (!lock) {
     out("not running", { hub: { running: false } });
+    if (!json) console.log(VIEW_HINT_LINE);
   } else {
     const info = await pingHub(lock.port);
     if (info) {
@@ -301,10 +303,74 @@ if (cmd === "hub" && sub === "start") {
         rmSync(join(home, "hub.json"), { force: true });
       }
       out("not running", { hub: { running: false } });
+      if (!json) console.log(VIEW_HINT_LINE);
     } else {
       out(`stale lockfile (pid ${lock.pid} not responding)`, {
         hub: { running: false, stale: true, pid: lock.pid },
       });
+    }
+  }
+} else if (cmd === "view") {
+  // 화면 서버(view 설계 §6.3). 서버·런처는 쓰는 순간에만 불러온다.
+  const known = ["--no-open", "--json", "--serve"];
+  const bad = rest.find((t) => t !== "stop" && !known.includes(t));
+  if (bad !== undefined) {
+    console.error(`unknown option: ${bad}`);
+    process.exit(1);
+  }
+  const home = pluriplyHome();
+  if (rest.includes("--serve")) {
+    // 신호가 서버보다 먼저 와도 받도록 핸들러를 먼저 건다
+    let server = null;
+    let stopping = false;
+    const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
+      (server ? server.close("stopped") : Promise.resolve())
+        .catch(() => {})
+        .then(() => process.exit(0));
+    };
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
+    const { startViewServer, makeHubSessionsFetcher } =
+      await import("../src/view/server.js");
+    const fetcher = makeHubSessionsFetcher(home);
+    if (stopping) process.exit(0);
+    server = await startViewServer({
+      home,
+      fetchSessions: () => fetcher.fetch(),
+    });
+    server.closed.then(() => fetcher.close());
+    if (stopping) shutdown();
+    await server.closed;
+    process.exit(0);
+  } else if (rest.includes("stop")) {
+    const { stopView } = await import("../src/shared/view-launch.js");
+    const result = await stopView({ home });
+    if (result === "stopped") console.log("view: stopped");
+    else if (result === "not-running") console.log("view: not running");
+    else if (result === "unresponsive") {
+      const { readViewLock } = await import("../src/shared/view-lock.js");
+      console.error(
+        `view: not answering (pid ${readViewLock(home)?.pid ?? "unknown"}); left running`,
+      );
+      process.exit(1);
+    } else {
+      console.error("view: failed to stop within 5s");
+      process.exit(1);
+    }
+  } else {
+    const { ensureView } = await import("../src/shared/view-launch.js");
+    try {
+      const r = await ensureView({ home, open: !rest.includes("--no-open") });
+      if (rest.includes("--json")) console.log(JSON.stringify(r));
+      else {
+        console.log(`Pluriply view: ${r.url}`);
+        if (!r.opened) console.log("Open this address in your browser.");
+      }
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
     }
   }
 } else if (cmd === "hook" && sub === "stop") {
@@ -364,7 +430,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status [--json]|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status [--json]|view [--no-open] [--json]|view stop|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }

@@ -66,6 +66,22 @@ After upgrading pluriply, run `pluriply status`: it compares the code each runni
 
 `pluriply status` also shows what went wrong in the last 24 hours, if anything: tasks whose target session could not be woken (`wake-failed`, followed by `to-worker` when a worker took over), tasks nobody picked up in time (`unclaimed`), tasks a session received but ended its turn without a result (`ignored`, followed by `to-worker` when a worker took over), workers that failed to start (`worker-failed`), and Stop hooks the hub could not match to a session. A `!` marks a `pluriply codex` session whose auto-wake stopped, with how to fix it (reopen it with `pluriply codex`); `·` marks a Codex session that was started without it. The sender's model sees the same failures in the task's `events` (`get_task_result`, `list_tasks`). A hub that was started automatically logs to `~/.pluriply/logs/hub.log`.
 
+## See it on screen
+
+```sh
+npx pluriply view
+```
+
+Opens a local page in your browser that shows what Pluriply is doing: the tools that are connected, your channels, and the task requests and results that went between them. The responder's working process is not shown, only the request and the result. You can also just ask your AI to "open the Pluriply view".
+
+The page is only reachable from this computer (`127.0.0.1`, protected by a key generated for each run). It keeps showing past history even when the hub is off. The page server exits by itself after 30 minutes with no open page; to stop it sooner:
+
+```sh
+npx pluriply view stop
+```
+
+Add `--no-open` to print the address without opening a browser, or `--json` for machine-readable output.
+
 ## Wake Codex sessions
 
 Start Codex with `pluriply codex` (any codex arguments work, e.g. `pluriply codex resume --last`).

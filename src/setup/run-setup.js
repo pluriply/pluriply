@@ -5,6 +5,8 @@ import { CLIENTS, makeEnv, isSkipped } from "./clients.js";
 import { HOOK_CLIENTS, hookStatus, installHook, removeHook } from "./hooks.js";
 import { setWorkerEnabled, TEMPLATE_AGENTS } from "../shared/config.js";
 import { readLock } from "../shared/lock.js";
+import { readViewLock } from "../shared/view-lock.js";
+import { VIEW_HINT_LINE } from "../shared/hints.js";
 // 허브(stopHub)와 커넥터(ensureHub → ws)는 쓰는 순간에만 불러온다. 공개 미러에는 src/hub 가
 // 없고 node_modules 도 없을 수 있으므로 이 모듈은 둘 없이 로드돼야 한다(Plan 4e §5).
 const hub = () => import("../hub/index.js");
@@ -292,6 +294,20 @@ async function runRemove({ targets, only, dryRun, purge, e, home }) {
     }
   }
   if (only) return out;
+  // 화면 서버는 종료 때 홈에 잠금을 다시 쓰므로 purge 가 홈을 지우기 전에 멈춘다
+  try {
+    const stopV =
+      e.stopView ?? (await import("../shared/view-launch.js")).stopView;
+    const viewLock = readViewLock(home);
+    out.view = await stopV({ home });
+    if (out.view === "timeout" || out.view === "unresponsive") {
+      out.viewPid = viewLock?.pid;
+      out.failed++;
+    }
+  } catch (err) {
+    out.viewError = err.message;
+    out.failed++;
+  }
   try {
     const stop = e.stopHub ?? (await hub()).stopHub;
     out.hub = await stop({ home });
@@ -301,6 +317,10 @@ async function runRemove({ targets, only, dryRun, purge, e, home }) {
   }
   if (out.hub === "timeout" || out.hub === "unresponsive") {
     out.hubPid = readLock(home)?.pid;
+    out.failed++;
+  } else if (purge && (out.view === "timeout" || out.view === "unresponsive")) {
+    // 살아 있는 화면 서버는 종료 때 홈에 잠금을 다시 쓴다 — 지워도 다시 생기므로 지우지 않는다
+    out.purgeError = `the view server is still running (pid ${out.viewPid ?? "unknown"})`;
     out.failed++;
   } else if (out.hub && purge) {
     const refusal = purgeRefusal(home, e);
@@ -386,6 +406,13 @@ export function formatSetup(r, { workers = false } = {}) {
         `hub: not answering (pid ${r.hubPid ?? "unknown"}); left running`,
       );
     else if (r.hubError) lines.push(`hub: could not stop (${r.hubError})`);
+    if (r.view === "stopped") lines.push("view: stopped");
+    else if (r.view === "timeout") lines.push("view: failed to stop within 5s");
+    else if (r.view === "unresponsive")
+      lines.push(
+        `view: not answering (pid ${r.viewPid ?? "unknown"}); left running`,
+      );
+    else if (r.viewError) lines.push(`view: could not stop (${r.viewError})`);
     if (r.purge) lines.push(`purge: ${r.purge}`);
     if (r.purgeError) lines.push(`purge: refused (${r.purgeError})`);
     if (r.note) lines.push(r.note);
@@ -405,5 +432,6 @@ export function formatSetup(r, { workers = false } = {}) {
   }
   lines.push(...codexLaunchHint(r.rows));
   lines.push(...codexTrustHint(r.hookRows));
+  lines.push(VIEW_HINT_LINE);
   return lines;
 }

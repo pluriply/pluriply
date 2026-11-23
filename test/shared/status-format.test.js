@@ -8,6 +8,7 @@ import {
   formatWhen,
   summarizeEvents,
 } from "../../src/shared/status-format.js";
+import { VIEW_HINT_LINE } from "../../src/shared/view-launch.js";
 
 const HUB = {
   version: "0.8.0",
@@ -585,6 +586,7 @@ test("problems section lists the last 24h of task and hub events with the log fi
     "  08:55  hook         claude-code ~/Desktop/…/developer   Stop hook matched 2 sessions; delivered by folder",
     "  08:50  hub          pickup check failed for task_zz: boom",
     "  logs: ~/.pluriply/logs/hub.log",
+    VIEW_HINT_LINE,
   ]);
   assert.equal(
     summarizeEvents([
@@ -893,6 +895,7 @@ test("an ignored task later handed to a worker renders as one problems line", ()
   assert.deepEqual(lines.slice(i + 1), [
     '  10:02  task task_1g9d  → codex   ignored, then to-worker   "port the parser"',
     "  logs: ~/.pluriply/logs/hub.log",
+    VIEW_HINT_LINE,
   ]);
 });
 
@@ -1111,4 +1114,20 @@ test("a failed wake outranks ~: the mark is ! and only the fix line shows; wake 
     /~ codex {8}\/w\/o .* on disk \(restart optional\) {3}wake off \(not started with pluriply codex\)\n {6}optional: exit and start codex again in \/w\/o$/m,
   );
   assert.match(text, /! codex {8}\/w\/k .* code 0\.11\.0 {3}wake failed 09:40/);
+});
+
+test("formatStatus ends with the view hint line, also when sessions are unavailable", () => {
+  const ok = buildStatus({
+    ping: PING,
+    sessions: { hub: HUB, sessions: [], problems: { tasks: [], events: [] } },
+    error: null,
+    fingerprint: disk(SAME).fn,
+  });
+  assert.equal(formatStatus(ok, {}).at(-1), VIEW_HINT_LINE);
+  const none = buildStatus({
+    ping: PING,
+    sessions: null,
+    error: "could not connect to the hub",
+  });
+  assert.equal(formatStatus(none, {}).at(-1), VIEW_HINT_LINE);
 });

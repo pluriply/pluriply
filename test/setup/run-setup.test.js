@@ -20,6 +20,8 @@ import { TEMPLATE_AGENTS } from "../../src/shared/config.js";
 import { emptyHome, seededHome } from "../fixtures/seeded-home.js";
 import { skipUnlessSymlinks } from "../fixtures/platform.js";
 import { HOOK_CLIENTS } from "../../src/setup/hooks.js";
+import { VIEW_HINT_LINE } from "../../src/shared/view-launch.js";
+import { writeViewLock } from "../../src/shared/view-lock.js";
 
 const BIN = "/opt/pluriply/bin/pluriply.js";
 
@@ -67,6 +69,7 @@ function fakeExec({ list = "pluriply" } = {}) {
 function setup({
   list,
   stop = "stopped",
+  viewStop = "not-running",
   stopHub,
   configDoc,
   claudeCode,
@@ -86,6 +89,7 @@ function setup({
   }
   const { exec, calls } = fakeExec({ list });
   const stopCalls = [];
+  const viewCalls = [];
   const rmCalls = [];
   const ensureCalls = [];
   const env = makeEnv({
@@ -102,6 +106,10 @@ function setup({
         stopCalls.push(h);
         return stop;
       }),
+    stopView: async ({ home: h }) => {
+      viewCalls.push(h);
+      return viewStop;
+    },
     rm: (p) => rmCalls.push(p),
     // 진짜 ensureHub 는 임시 홈에 detached 허브를 띄우고 아무도 끄지 않는다(실행마다 3개가 남았다).
     ensureHub: async ({ home: h }) => {
@@ -109,7 +117,16 @@ function setup({
       return { port: 4242 };
     },
   });
-  return { user, home, env, calls, stopCalls, rmCalls, ensureCalls };
+  return {
+    user,
+    home,
+    env,
+    calls,
+    stopCalls,
+    viewCalls,
+    rmCalls,
+    ensureCalls,
+  };
 }
 
 const results = (r) => Object.fromEntries(r.rows.map((x) => [x.id, x.result]));
@@ -802,4 +819,87 @@ test("hooksOnly honours --dry-run and --only", async () => {
   });
   assert.deepEqual(hookResults(dryRemove), { codex: "planned" });
   assert.equal(existsSync(hookFile(env, "codex")), true);
+});
+
+test("setup --remove stops the view server before the hub and reports it", async () => {
+  const { env, home, viewCalls, stopCalls } = setup({ viewStop: "stopped" });
+  const order = [];
+  const stopHub = env.stopHub;
+  const stopView = env.stopView;
+  env.stopView = async (o) => (order.push("view"), stopView(o));
+  env.stopHub = async (o) => (order.push("hub"), stopHub(o));
+  const r = await runSetup({ remove: true, env, home });
+  assert.deepEqual(viewCalls, [home]);
+  assert.deepEqual(stopCalls, [home]);
+  assert.deepEqual(order, ["view", "hub"]);
+  assert.equal(r.view, "stopped");
+  assert.ok(formatSetup(r).includes("view: stopped"));
+});
+
+test("setup --remove prints no view line when no view server was running", async () => {
+  const { env, home } = setup({ viewStop: "not-running" });
+  const r = await runSetup({ remove: true, env, home });
+  assert.ok(!formatSetup(r).some((l) => l.startsWith("view:")));
+});
+
+test("setup --remove dry run never stops the view server", async () => {
+  const { env, home, viewCalls } = setup();
+  const r = await runSetup({ remove: true, dryRun: true, env, home });
+  assert.deepEqual(viewCalls, []);
+  assert.equal(r.view, undefined);
+});
+
+test("setup --remove --purge refuses to purge while the view server is still running", async () => {
+  for (const viewStop of ["unresponsive", "timeout"]) {
+    const { env, home, rmCalls } = setup({ viewStop });
+    writeViewLock(home, {
+      pid: 4321,
+      port: 1,
+      key: "k",
+      startedAt: "x",
+      version: "0",
+    });
+    const r = await runSetup({ remove: true, purge: true, env, home });
+    assert.equal(r.purge, undefined, viewStop);
+    assert.deepEqual(rmCalls, [], viewStop);
+    assert.equal(
+      r.purgeError,
+      "the view server is still running (pid 4321)",
+      viewStop,
+    );
+    assert.ok(
+      formatSetup(r).includes(
+        "purge: refused (the view server is still running (pid 4321))",
+      ),
+      viewStop,
+    );
+    assert.ok(r.failed >= 2, viewStop);
+  }
+  // 화면 서버가 멈췄거나 없었으면 purge 는 그대로 진행한다
+  const { env, home, rmCalls } = setup({ viewStop: "stopped" });
+  const r = await runSetup({ remove: true, purge: true, env, home });
+  assert.equal(r.purgeError, undefined);
+  assert.equal(rmCalls.length, 1);
+});
+
+test("setup install output ends with the view hint line", async () => {
+  const { env, home } = setup();
+  const r = await runSetup({ env, home });
+  assert.equal(formatSetup(r).at(-1), VIEW_HINT_LINE);
+});
+
+test("setup --remove counts an unresponsive or timed-out view server as failed", async () => {
+  for (const viewStop of ["unresponsive", "timeout"]) {
+    const { env, home } = setup({ viewStop });
+    const r = await runSetup({ remove: true, env, home });
+    assert.equal(r.view, viewStop);
+    assert.ok(r.failed >= 1, viewStop);
+  }
+  const { env, home } = setup({ viewStop: "unresponsive" });
+  const r = await runSetup({ remove: true, env, home });
+  assert.ok(
+    formatSetup(r).some((l) =>
+      /^view: not answering \(pid .*\); left running$/.test(l),
+    ),
+  );
 });

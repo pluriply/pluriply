@@ -4,6 +4,7 @@
 // Plan 6e(스펙 §4·§5): 세션은 재시작 번호로 판정한다 — 번호가 다르면 restart(✗), 번호가 같고 지문만 다르면
 // optional(~, 재시작은 선택), 한쪽이라도 번호를 모르면 지문 규칙 그대로. 허브는 지문만 본다.
 import { codeFingerprint, restartLevel } from "./fingerprint.js";
+import { VIEW_HINT_LINE } from "./hints.js";
 
 const APP = {
   antigravity: "Antigravity",
@@ -262,6 +263,11 @@ function wakeText(s, now) {
 
 /** @param {ReturnType<typeof buildStatus>} st @param {{home?: string, now?: Date}} [o] @returns {string[]} */
 export function formatStatus(st, { home, now = new Date() } = {}) {
+  return [...statusLines(st, { home, now }), VIEW_HINT_LINE];
+}
+
+/** @param {ReturnType<typeof buildStatus>} st @param {{home?: string, now: Date}} o @returns {string[]} */
+function statusLines(st, { home, now }) {
   const h = st.hub;
   const lines = [
     `hub      running (port ${h.port}, pid ${h.pid}, version ${clean(h.version ?? "unknown")}, protocol ${h.protocol})`,
