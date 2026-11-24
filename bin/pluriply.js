@@ -18,12 +18,38 @@ import { connectIfLive } from "../src/connector/hub-client.js";
 import { isValidAgentName } from "../src/shared/identity.js";
 import { registerMcpServer } from "../src/shared/mcp-register.js";
 import { buildStatus, formatStatus } from "../src/shared/status-format.js";
-import { VIEW_HINT_LINE } from "../src/shared/hints.js";
+import { VIEW_HINT_LINE, hasHint, markHint } from "../src/shared/hints.js";
+import {
+  TELEMETRY_NOTICE,
+  printTelemetryNotice,
+  disabledReason,
+  readState,
+  buildPayload,
+  setEnabled,
+  noteEnvOptOut,
+} from "../src/shared/telemetry.js";
+import { PACKAGE_VERSION } from "../src/shared/version.js";
 
 const BIN_PATH = fileURLToPath(import.meta.url);
 
 const [cmd, ...rest] = process.argv.slice(2);
 const sub = rest[0];
+
+// 환경 변수 끄기(PLURIPLY_TELEMETRY=0·DO_NOT_TRACK·CI)를 본 즉시 홈에 기억한다 — 이 셸 밖에서 뜬 허브
+// (Codex·Dock 으로 띄운 도구가 띄운 허브)도 따르게. noteEnvOptOut 은 던지지 않지만 명령을 흔들지 않게 감싼다.
+try {
+  noteEnvOptOut(pluriplyHome());
+} catch {
+  // 무시
+}
+
+/**
+ * 처음 안내를 "알렸다"고 기록해도 되는지: 사람이 보는 터미널일 때만. PLURIPLY_TELEMETRY_ASSUME_TTY=1 은
+ * 테스트 전용(파이프로 받는 시험이 기록까지 확인하게) — 문서에는 적지 않는다.
+ */
+const humanSees = () =>
+  process.stdout.isTTY === true ||
+  process.env.PLURIPLY_TELEMETRY_ASSUME_TTY === "1";
 
 /**
  * `--agent x` 와 `--agent=x` 둘 다 파싱한다. 값이 없거나(마지막 토큰) 뒤 토큰이 `--`로 시작하면
@@ -238,6 +264,12 @@ if (cmd === "hub" && sub === "start") {
     });
     if (dryRun) console.log("(dry run — nothing was changed)");
     for (const line of formatSetup(r, { workers })) console.log(line);
+    if (!dryRun && !remove) {
+      for (const line of printTelemetryNotice(pluriplyHome(), {
+        mark: humanSees(),
+      }))
+        console.log(line);
+    }
     if (r.failed > 0) process.exit(1);
   } catch (err) {
     console.error(`setup failed: ${err.message}`);
@@ -247,11 +279,28 @@ if (cmd === "hub" && sub === "start") {
   const json = rest.includes("--json");
   const home = pluriplyHome();
   const lock = readLock(home);
+  // 안내는 사람용 출력 맨 끝에만(터미널일 때만 기록한다). --json 은 기록 없이 필드만 더한다.
+  const notice = () => {
+    if (json) return;
+    for (const line of printTelemetryNotice(home, { mark: humanSees() }))
+      console.log(line);
+  };
   const out = (text, obj) =>
-    console.log(json ? JSON.stringify(obj, null, 2) : text);
+    console.log(
+      json
+        ? JSON.stringify(
+            hasHint(home, "telemetry")
+              ? obj
+              : { ...obj, telemetryNotice: TELEMETRY_NOTICE },
+            null,
+            2,
+          )
+        : text,
+    );
   if (!lock) {
     out("not running", { hub: { running: false } });
     if (!json) console.log(VIEW_HINT_LINE);
+    notice();
   } else {
     const info = await pingHub(lock.port);
     if (info) {
@@ -289,10 +338,12 @@ if (cmd === "hub" && sub === "start") {
         // src/hub/lifecycle.js 의 hubLogPath 와 같은 경로 — bin 은 허브를 공개 경계(index.js)로만 가져온다
         logFile: join(home, "logs", "hub.log"),
       });
-      if (json) console.log(JSON.stringify(st, null, 2));
-      else
+      if (json) out("", st);
+      else {
         for (const line of formatStatus(st, { home: homedir() }))
           console.log(line);
+        notice();
+      }
     } else if (!pidAlive(lock.pid)) {
       // Windows 에서는 SIGTERM 이 정리 핸들러 없이 즉시 종료라 허브가 락을 못 지운다.
       // pid 가 죽었으면 stopHub 와 같은 판정으로 락을 지우고 not running 으로 본다.
@@ -304,11 +355,55 @@ if (cmd === "hub" && sub === "start") {
       }
       out("not running", { hub: { running: false } });
       if (!json) console.log(VIEW_HINT_LINE);
+      notice();
     } else {
       out(`stale lockfile (pid ${lock.pid} not responding)`, {
         hub: { running: false, stale: true, pid: lock.pid },
       });
+      notice();
     }
+  }
+} else if (cmd === "telemetry") {
+  const home = pluriplyHome();
+  const arg = sub;
+  const json = rest.includes("--json") || sub === "--json";
+  if (arg === "on" || arg === "off") {
+    setEnabled(home, arg === "on");
+    // 직접 고른 사용자에게 처음 안내는 필요 없다
+    markHint(home, "telemetry");
+    if (json) {
+      const reason = disabledReason({ home });
+      console.log(JSON.stringify({ enabled: reason === null, reason }));
+    } else console.log(`telemetry ${arg}`);
+  } else if (arg === undefined || arg === "status" || arg === "--json") {
+    // 보내지 않는다 — 보낼 내용을 만들어 보여 주기만 한다
+    const reason = disabledReason({ home });
+    const state = readState(home);
+    const payload = buildPayload({ home, version: PACKAGE_VERSION });
+    const lastSentAt = state.lastSentAt ?? null;
+    if (json) {
+      console.log(
+        JSON.stringify(
+          { enabled: reason === null, reason, lastSentAt, payload },
+          null,
+          2,
+        ),
+      );
+    } else {
+      console.log(
+        reason === null ? "telemetry on" : `telemetry off (${reason})`,
+      );
+      if (["env", "do-not-track", "ci"].includes(reason))
+        console.log(
+          "remembered on this computer until: npx pluriply telemetry on",
+        );
+      console.log(`last sent ${lastSentAt ?? "never"}`);
+      console.log("would send:");
+      console.log(JSON.stringify(payload, null, 2));
+    }
+  } else {
+    console.error("usage: pluriply telemetry [status [--json]|on|off]");
+    process.exit(1);
   }
 } else if (cmd === "view") {
   // 화면 서버(view 설계 §6.3). 서버·런처는 쓰는 순간에만 불러온다.
@@ -430,7 +525,7 @@ if (cmd === "hub" && sub === "start") {
   await startConnector({ agent });
 } else {
   console.error(
-    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status [--json]|view [--no-open] [--json]|view stop|worker enable|disable <codex|claude-code|antigravity>|worker list>",
+    "usage: pluriply <setup [--workers] [--dry-run] [--only a,b] [--no-hooks|--hooks-only]|setup --remove [--purge] [--dry-run] [--only a,b] [--hooks-only]|hub start|hub stop|hub restart|hook stop --agent <claude-code|codex|antigravity>|codex [codex args…]|connector --agent <name>|status [--json]|telemetry [status [--json]|on|off]|view [--no-open] [--json]|view stop|worker enable|disable <codex|claude-code|antigravity>|worker list>",
   );
   process.exit(1);
 }

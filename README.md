@@ -117,6 +117,54 @@ only ping it (version and pid) and gets `unauthorized` for everything else.
 On Windows the file mode is not enforced — the profile folder's ACL is what
 keeps other users out.
 
+## Telemetry
+
+Pluriply sends one anonymous usage count per day while the hub is running.
+It only starts after the one-time notice that `npx pluriply setup` or
+`npx pluriply status` prints in your terminal. The code that builds and sends
+it is in `src/shared/telemetry.js` — you can read exactly what leaves your
+machine.
+
+What is sent (schema 1):
+
+| Field                | Meaning                                                                                                                                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema`             | Format version (`1`).                                                                                                                                                                                 |
+| `id`                 | Random UUID made on first send and stored in `~/.pluriply/telemetry.json`. Not derived from your hardware or accounts. Deleted when you turn telemetry off; a new one is made if you turn it back on. |
+| `version`            | Pluriply version.                                                                                                                                                                                     |
+| `os`                 | `process.platform` and `process.arch`, e.g. `darwin-arm64`.                                                                                                                                           |
+| `node`               | Node major version.                                                                                                                                                                                   |
+| `tools`              | Which tools (`claude-code`, `codex`, `antigravity`, or `other`) connected to the hub in the last 24 hours.                                                                                            |
+| `last24h.sent`       | Number of tasks created in the last 24 hours.                                                                                                                                                         |
+| `last24h.completed`  | How many of those finished successfully.                                                                                                                                                              |
+| `last24h.failed`     | How many of those failed.                                                                                                                                                                             |
+| `last24h.viewOpened` | How many times the on-screen view was opened in the last 24 hours.                                                                                                                                    |
+
+Never sent: prompts or task contents, results, file paths, project or folder
+names, channel codes, task IDs, host or user names. The server does not store
+IP addresses; raw records are kept for 400 days.
+
+Nothing is sent when telemetry is off, before the first notice has been shown,
+in CI environments (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`,
+`JENKINS_URL`, `TF_BUILD`), or when the data folder is under the OS temp
+folder (used by tests). Three ways to turn it off:
+
+```sh
+npx pluriply telemetry off      # remembered; `telemetry on` turns it back on
+export PLURIPLY_TELEMETRY=0     # environment variable
+export DO_NOT_TRACK=1           # the common opt-out convention
+```
+
+The most reliable way is `npx pluriply telemetry off`. The hub may be started
+by an AI tool that does not see your shell's variables (Codex filters them;
+apps launched from the Dock have no shell profile), so the first time any
+`pluriply` command or AI window sees `PLURIPLY_TELEMETRY=0`, `DO_NOT_TRACK=1`
+or a CI variable, Pluriply records it in `~/.pluriply` and stays off — even
+after the variable is gone — until you run `npx pluriply telemetry on`.
+
+`npx pluriply telemetry` shows whether it is on or off, why, and the exact JSON
+it would send.
+
 ## License
 
 The CLI, connector, shared utilities and setup code in this repository are

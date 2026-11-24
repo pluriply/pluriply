@@ -9,6 +9,7 @@ import { pluriplyHome } from "./paths.js";
 import { PACKAGE_VERSION } from "./version.js";
 import { readViewLock, removeViewLockIf, KEY_HEADER } from "./view-lock.js";
 import { markHint, VIEW_HINT_LINE } from "./hints.js";
+import { noteViewOpened } from "./telemetry.js";
 
 // 화면 서버를 띄우거나 재사용하고 브라우저를 여는 런처(view 설계 §6.3). CLI·커넥터 공용이라
 // 허브 코드를 가져오지 않는다(공개 미러에는 src/hub 가 없다).
@@ -219,6 +220,11 @@ export async function ensureView({
     markHint(home, "view");
   } catch {
     // 힌트 기록 실패는 열기를 막지 않는다
+  }
+  try {
+    noteViewOpened(home);
+  } catch {
+    // 횟수 기록은 열기 결과에 영향을 주지 않는다
   }
   return { url, opened, reused };
 }

@@ -71,7 +71,7 @@ export function hasCdFlag(args) {
  * pluriply MCP 서버(커넥터)의 환경을 codex 설정으로 넘기는 `-c mcp_servers.pluriply.env.KEY=…` 인자들.
  * Codex 는 MCP 서버에 부모 환경 변수를 걸러 넘긴다(codex-cli 0.155.1 실측) — env 로 주면 커넥터에 닿지
  * 않는다. 기본이 아닌 홈(PLURIPLY_HOME)과 codex 실행 파일(PLURIPLY_CODEX_BIN — 커넥터의 `codex queue` 가
- * 같은 실행 파일을 쓰게)은 있을 때만, 깨우기를 못 켠 이유(PLURIPLY_CODEX_WAKE_ERROR, Plan 6c §3.4)는
+ * 같은 실행 파일을 쓰게)·사용 통계 끄기 변수(PLURIPLY_TELEMETRY·DO_NOT_TRACK)는 있을 때만, 깨우기를 못 켠 이유(PLURIPLY_CODEX_WAKE_ERROR, Plan 6c §3.4)는
  * 주어졌을 때만 넣는다. JSON 문자열은 이 값들에 한해 TOML basic string 으로도 유효하다.
  * @param {{env: NodeJS.ProcessEnv, wakeError?: string|null}} o @returns {string[]}
  */
@@ -82,6 +82,9 @@ export function connectorEnvArgs({ env, wakeError = null }) {
   if (env.PLURIPLY_HOME) put("PLURIPLY_HOME", env.PLURIPLY_HOME);
   if (env.PLURIPLY_CODEX_BIN) put("PLURIPLY_CODEX_BIN", env.PLURIPLY_CODEX_BIN);
   if (wakeError) put("PLURIPLY_CODEX_WAKE_ERROR", wakeError);
+  // 사용 통계 끄기 변수 — 걸러지면 커넥터·허브가 사용자의 끄기를 모른다
+  if (env.PLURIPLY_TELEMETRY) put("PLURIPLY_TELEMETRY", env.PLURIPLY_TELEMETRY);
+  if (env.DO_NOT_TRACK) put("DO_NOT_TRACK", env.DO_NOT_TRACK);
   return out;
 }
 

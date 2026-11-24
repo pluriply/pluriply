@@ -11,6 +11,7 @@ import { PACKAGE_VERSION } from "../shared/version.js";
 import { makeVersionCheck } from "./version-check.js";
 import { pluriplyHome } from "../shared/paths.js";
 import { hasHint, markHint } from "../shared/hints.js";
+import { TELEMETRY_REMINDER, disabledReason } from "../shared/telemetry.js";
 
 const CODE_ROOT = installRoot();
 const START_CODE = codeFingerprint(CODE_ROOT, "connector");
@@ -228,6 +229,31 @@ export function registerTools(
     };
   };
   /**
+   * 첫 위임이 성공했고 아직 통계 상기를 못 했으면 결과 끝(VIEW_TIP 다음)에 TELEMETRY_REMINDER 를 붙이고
+   * `telemetry-reminder` 만 기록한다. `telemetry` 힌트(알림 완료)는 CLI 만 쓴다. 사용자가 끄거나
+   * 환경이 껐으면(turned-off·env·do-not-track·ci) 말하지 않는다. 실패는 결과에 영향이 없다.
+   */
+  const withTelemetryReminder = (result) => {
+    if (worker || result?.isError === true || !Array.isArray(result?.content))
+      return result;
+    try {
+      if (hasHint(home, "telemetry-reminder")) return result;
+      const why = disabledReason({ home, env, ignoreNotice: true });
+      if (["turned-off", "env", "do-not-track", "ci"].includes(why))
+        return result;
+      markHint(home, "telemetry-reminder");
+    } catch {
+      return result;
+    }
+    return {
+      ...result,
+      content: [
+        ...result.content,
+        { type: "text", text: `\n${TELEMETRY_REMINDER}` },
+      ],
+    };
+  };
+  /**
    * 도구를 등록하되, 호출마다 Codex 가 _meta 에 싣는 스레드 ID 를 기록하고, 결과 끝에
    * 옛 코드 경고를 덧붙인다(Plan 6a §7). 첫 항목(JSON)은 건드리지 않는다 — 결과를 파싱하는
    * 쪽이 영향을 받지 않게 한다.
@@ -237,7 +263,10 @@ export function registerTools(
       const tid = threadIdFromExtra(a[a.length - 1]);
       if (tid) state.threadId = tid;
       let result = await handler(...a);
-      if (VIEW_TIP_TOOLS.has(name)) result = withViewTip(result);
+      if (VIEW_TIP_TOOLS.has(name)) {
+        result = withViewTip(result);
+        result = withTelemetryReminder(result);
+      }
       let lines = [];
       try {
         lines = codeWarnings();

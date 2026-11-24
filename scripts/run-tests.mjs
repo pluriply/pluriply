@@ -145,6 +145,7 @@ if (
   const r = spawnSync(process.execPath, ["--test", ...files], {
     stdio: "inherit",
     cwd: ROOT,
+    env: { ...process.env, PLURIPLY_TELEMETRY: "0" },
   });
   warnLeakedHubs(hubsBefore);
   process.exit(r.status ?? 1);

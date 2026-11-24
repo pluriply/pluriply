@@ -103,6 +103,45 @@ npx pluriply setup --remove     # 모든 도구에서 Pluriply 등록 해제(데
 
 업데이트하거나 npx 캐시를 지운 뒤에는 `npx pluriply@latest setup --hooks-only` 를 한 번 실행하세요.
 
+## 사용 통계
+
+Pluriply 는 허브가 떠 있는 동안 **익명 사용 횟수를 하루 한 번** 보냅니다.
+`npx pluriply setup` 또는 `npx pluriply status` 가 터미널에 한 번 보여 주는 안내 **뒤부터** 시작하며,
+보내는 코드는 `src/shared/telemetry.js` 에 그대로 있어 무엇이 나가는지 직접 읽을 수 있습니다.
+
+보내는 내용(schema 1):
+
+| 필드                 | 뜻                                                                                                                                        |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema`             | 형식 번호(`1`)                                                                                                                            |
+| `id`                 | 처음 보낼 때 만든 무작위 UUID(`~/.pluriply/telemetry.json` 에 저장). 하드웨어·계정에서 만들지 않으며, 끄면 지우고 다시 켜면 새로 만듭니다 |
+| `version`            | Pluriply 버전                                                                                                                             |
+| `os`                 | 운영체제와 아키텍처(예: `darwin-arm64`)                                                                                                   |
+| `node`               | Node 주 버전                                                                                                                              |
+| `tools`              | 지난 24시간 동안 허브에 붙은 도구 종류(`claude-code`·`codex`·`antigravity`·`other`)                                                       |
+| `last24h.sent`       | 지난 24시간에 만든 태스크 수                                                                                                              |
+| `last24h.completed`  | 그중 완료된 수                                                                                                                            |
+| `last24h.failed`     | 그중 실패한 수                                                                                                                            |
+| `last24h.viewOpened` | 지난 24시간에 화면을 연 횟수                                                                                                              |
+
+**보내지 않는 것**: 프롬프트·작업 내용, 결과, 파일 경로, 프로젝트·폴더 이름, 채널 코드, 태스크 ID, 호스트·사용자 이름.
+서버는 IP 주소를 저장하지 않고, 원본 기록은 400일 보관합니다.
+
+끄면, 첫 안내를 보기 전에는, CI 환경(`CI`·`GITHUB_ACTIONS` 등)이나 데이터 폴더가 OS 임시 폴더 아래(테스트용)일 때는 아무것도 보내지 않습니다. 끄는 방법은 세 가지입니다.
+
+```sh
+npx pluriply telemetry off      # 끄기(다시 켜려면 telemetry on)
+export PLURIPLY_TELEMETRY=0     # 환경 변수
+export DO_NOT_TRACK=1           # 널리 쓰이는 거부 표시
+```
+
+가장 확실한 방법은 `npx pluriply telemetry off` 입니다. 허브는 셸의 환경 변수를 못 보는 AI 도구가 띄울 수도 있어서
+(Codex 는 변수를 거르고, Dock 으로 연 앱에는 셸 설정이 없습니다), `PLURIPLY_TELEMETRY=0`·`DO_NOT_TRACK=1`·CI 변수는
+어떤 `pluriply` 명령이나 AI 창이 **처음 본 순간** `~/.pluriply` 에 기록되고, 그 뒤로는 변수가 없어져도
+`npx pluriply telemetry on` 을 실행할 때까지 꺼져 있습니다.
+
+`npx pluriply telemetry` 를 실행하면 켜짐·꺼짐과 이유, 그리고 실제로 보낼 JSON 을 그대로 보여 줍니다.
+
 ## 써 보고 알려 주세요
 
 다 써 보셨다면 아래 질문에 짧게라도 답해 주시면 큰 도움이 됩니다.

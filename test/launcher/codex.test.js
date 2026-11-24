@@ -44,9 +44,13 @@ function setup(extraEnv = {}) {
     '[mcp_servers.pluriply]\ncommand = "node"\n',
   );
   const logs = [];
+  // 시험 실행기가 넣는 PLURIPLY_TELEMETRY=0 등은 커넥터 인자로 넘어가므로(그 시험은 따로) 인자 모양 시험에서는 뺀다
+  const base = { ...process.env };
+  delete base.PLURIPLY_TELEMETRY;
+  delete base.DO_NOT_TRACK;
   const run = (args, over = {}) =>
     runCodex(args, {
-      env: { ...process.env, FAKE_CODEX_OUT: out, ...extraEnv },
+      env: { ...base, FAKE_CODEX_OUT: out, ...extraEnv },
       platform: "darwin",
       cwd: "/work/here",
       bin: process.execPath,
@@ -470,6 +474,27 @@ test("connectorEnvArgs passes home, codex binary and the wake error only when pr
   );
   assert.deepEqual(
     connectorEnvArgs({ env: { PLURIPLY_HOME: "" }, wakeError: null }),
+    [],
+  );
+});
+
+test("connectorEnvArgs forwards the telemetry opt-out variables when set", () => {
+  assert.deepEqual(
+    connectorEnvArgs({
+      env: { PLURIPLY_TELEMETRY: "0", DO_NOT_TRACK: "1" },
+      wakeError: "w",
+    }),
+    [
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_CODEX_WAKE_ERROR="w"',
+      "-c",
+      'mcp_servers.pluriply.env.PLURIPLY_TELEMETRY="0"',
+      "-c",
+      'mcp_servers.pluriply.env.DO_NOT_TRACK="1"',
+    ],
+  );
+  assert.deepEqual(
+    connectorEnvArgs({ env: { PLURIPLY_TELEMETRY: "", DO_NOT_TRACK: "" } }),
     [],
   );
 });

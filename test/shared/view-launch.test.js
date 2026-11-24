@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+} from "node:fs";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -248,4 +254,17 @@ test("stopView returns unresponsive without killing or unlocking when the port a
   });
   assert.equal(await stopView({ home, timeoutMs: 800 }), "unresponsive");
   assert.ok(existsSync(join(home, "view.json")));
+});
+
+test("ensureView records one view opening for telemetry", async (t) => {
+  const { home, start } = ctx(t);
+  await ensureView({
+    home,
+    spawnServe: () => void start(),
+    openBrowser: () => true,
+  });
+  const counts = JSON.parse(
+    readFileSync(join(home, "telemetry-counts.json"), "utf8"),
+  );
+  assert.equal(counts.viewOpened.length, 1);
 });

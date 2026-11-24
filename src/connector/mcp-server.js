@@ -3,6 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { isValidAgentName, resolveAgentName } from "../shared/identity.js";
 import { HubClient } from "./hub-client.js";
 import { registerTools, hello } from "./tools.js";
+import { pluriplyHome } from "../shared/paths.js";
+import { noteEnvOptOut } from "../shared/telemetry.js";
 
 /**
  * 허브 접속·정체성 확인·도구 등록까지 수행한다(stdio 연결은 하지 않는다 —
@@ -15,6 +17,8 @@ export async function buildConnector({
   home,
   connect = (o) => HubClient.connect(o),
 }) {
+  // AI 창이 PLURIPLY_TELEMETRY=0 등을 물려받았으면 허브를 띄우기 전에 기억한다(던지지 않는다)
+  noteEnvOptOut(home ?? pluriplyHome());
   // 워커 커넥터는 허브를 띄우지 않는다(허브가 없으면 워커가 할 일도 없다) — 대화형 커넥터만 필요하면 띄운다
   const hub = await connect({
     home,
